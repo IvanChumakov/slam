@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { VoiceApi } from '../api/voiceApi';
 import { voiceErrorMessage } from './errorMessages';
-import type { VoiceClient, VoiceParticipant, VoiceSnapshot } from './types';
+import type {
+  VoiceClient,
+  VoiceClientFactory,
+  VoiceParticipant,
+  VoiceSnapshot,
+} from './types';
 
 export type VoiceRoomPhase =
   | 'idle'
@@ -25,7 +30,7 @@ export type VoiceRoomState = {
 type UseVoiceRoomOptions = {
   token: string;
   api: VoiceApi;
-  createClient: () => VoiceClient;
+  createClient: VoiceClientFactory;
 };
 
 const initialState: VoiceRoomState = {
@@ -115,7 +120,7 @@ export function useVoiceRoom({ token, api, createClient }: UseVoiceRoomOptions) 
           roomName: credentials.room.name,
         }));
 
-        const client = createClient();
+        const client = await createClient();
         clientRef.current = client;
         unsubscribeRef.current = client.subscribe(handleSnapshot);
 

@@ -5,7 +5,7 @@ import {
   type RemoteParticipant,
   type RemoteTrack,
   type RemoteTrackPublication,
-  type TrackPublication,
+  type LocalTrackPublication,
 } from 'livekit-client';
 import { describe, expect, it, vi } from 'vitest';
 import { LiveKitVoiceClient } from './LiveKitVoiceClient';
@@ -36,7 +36,7 @@ function createRoom() {
   room.localParticipant.name = 'Ivan';
   vi.spyOn(room.localParticipant, 'getTrackPublication').mockReturnValue({
     isMuted: false,
-  } as TrackPublication);
+  } as LocalTrackPublication);
 
   return { room, connect, disconnect, startAudio, setMicrophoneEnabled };
 }

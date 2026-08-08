@@ -22,3 +22,5 @@ export interface VoiceClient {
   enableAudio(): Promise<void>;
   disconnect(): Promise<void>;
 }
+
+export type VoiceClientFactory = () => VoiceClient | Promise<VoiceClient>;
