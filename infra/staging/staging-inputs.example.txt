@@ -1,0 +1,20 @@
+STAGING INPUTS — DO NOT PUT SECRETS IN THIS FILE
+
+Cloud provider:
+Region / city:
+Linux distribution:
+VM public IPv4:
+VM public IPv6 (optional):
+SSH host/user:
+
+RTC domain (example: rtc.example.ru):
+TURN domain (example: turn.example.ru):
+DNS provider:
+
+Backend webhook URL:
+
+Firewall management location:
+Expected test networks/devices:
+
+Secrets such as SSH private keys, LIVEKIT_API_SECRET and TLS private keys
+must be delivered separately and must never be added to this file or Git.

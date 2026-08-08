@@ -1,0 +1,43 @@
+# Local development configuration.
+# Production/staging deployment is generated separately because it requires
+# a public IP, trusted TLS certificates, Redis, and TURN configuration.
+
+port: 7880
+bind_addresses:
+  - "0.0.0.0"
+
+rtc:
+  # TCP fallback when a client cannot establish an UDP media connection.
+  tcp_port: 7881
+
+  # UDP mux keeps the local Docker Desktop port mapping compact. Production
+  # may use a wider UDP range for higher concurrency.
+  udp_port: 7882
+
+  # Local Docker development does not advertise a public address.
+  use_external_ip: false
+  allow_tcp_fallback: true
+
+room:
+  auto_create: true
+  empty_timeout: 300
+  departure_timeout: 20
+  enabled_codecs:
+    - mime: audio/opus
+
+logging:
+  level: info
+  pion_level: warn
+  json: false
+
+# Development-only receiver managed by docker-compose.yml. The signing key
+# must match LIVEKIT_API_KEY (devkey in the local defaults).
+webhook:
+  api_key: devkey
+  urls:
+    - http://webhook-receiver:8080/webhook
+
+# Embedded TURN is enabled only in staging, where a public TURN domain and a
+# trusted TLS certificate are available.
+turn:
+  enabled: false

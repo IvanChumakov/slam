@@ -1,0 +1,38 @@
+name: telegram-voice-infra
+
+services:
+  webhook-receiver:
+    build:
+      context: ./webhook-test
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+  livekit:
+    image: ${LIVEKIT_IMAGE:-livekit/livekit-server:v1.13.1}
+    command:
+      - --config
+      - /etc/livekit/livekit.yaml
+    environment:
+      # LiveKit accepts one or more "key: secret" pairs through LIVEKIT_KEYS.
+      # Defaults are intentionally local-only and must never be used in staging.
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:-devkey}: ${LIVEKIT_API_SECRET:-local-development-secret-change-me}"
+    volumes:
+      - ./livekit.yaml:/etc/livekit/livekit.yaml:ro
+    depends_on:
+      webhook-receiver:
+        condition: service_healthy
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+    restart: unless-stopped
+    stop_grace_period: 30s
