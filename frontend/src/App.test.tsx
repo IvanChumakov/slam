@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
@@ -29,6 +29,35 @@ function createDependencies() {
 }
 
 describe('App', () => {
+  it('explains that room access is being requested while the backend responds', async () => {
+    let resolveJoin: ((value: Awaited<ReturnType<VoiceApi['join']>>) => void) | undefined;
+    const pendingJoin = new Promise<Awaited<ReturnType<VoiceApi['join']>>>((resolve) => {
+      resolveJoin = resolve;
+    });
+    const { api, dependencies } = createDependencies();
+    vi.mocked(api.join).mockReturnValue(pendingJoin);
+    render(
+      <MemoryRouter initialEntries={['/join/signed-token']}>
+        <App dependencies={dependencies} />
+      </MemoryRouter>,
+    );
+
+    await userEvent.type(screen.getByLabelText('Your name'), 'Ivan');
+    await userEvent.click(screen.getByRole('button', { name: 'Join voice' }));
+
+    expect(screen.getByRole('status')).toHaveTextContent('Getting room access…');
+
+    await act(async () => {
+      resolveJoin?.({
+        livekit_url: 'wss://rtc.test',
+        access_token: 'jwt',
+        room: { id: 42, name: 'General' },
+        participant: { identity: 'guest_1', display_name: 'Ivan' },
+      });
+      await pendingJoin;
+    });
+  });
+
   it('joins with the route token and renders the backend room name', async () => {
     const { api, client, dependencies } = createDependencies();
     render(

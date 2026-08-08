@@ -37,4 +37,31 @@ describe('JoinScreen', () => {
     expect(screen.getByLabelText('Your name')).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Connecting…' })).toBeDisabled();
   });
+
+  it('explains the active connection step', () => {
+    render(
+      <JoinScreen
+        busy
+        error={null}
+        progressMessage="Requesting microphone access…"
+        onJoin={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Requesting microphone access…',
+    );
+  });
+
+  it('offers an explicit retry after a recoverable error', () => {
+    render(
+      <JoinScreen
+        busy={false}
+        error="The voice service is unavailable. Try again."
+        onJoin={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled();
+  });
 });

@@ -4,8 +4,22 @@ import type { AppDependencies } from './appDependencies';
 import { JoinScreen } from './components/JoinScreen';
 import { VoiceRoom } from './components/VoiceRoom';
 import { useVoiceRoom } from './voice/useVoiceRoom';
+import type { VoiceRoomState } from './voice/useVoiceRoom';
 
 const defaultDependencies = createAppDependencies();
+
+function progressMessage(state: VoiceRoomState) {
+  switch (state.phase) {
+    case 'requestingCredentials':
+      return 'Getting room access…';
+    case 'connecting':
+      return `Connecting to ${state.roomName || 'the voice room'}…`;
+    case 'requestingMicrophone':
+      return 'Requesting microphone access…';
+    default:
+      return undefined;
+  }
+}
 
 function InviteError() {
   return (
@@ -64,7 +78,14 @@ function VoiceJoinPage({ dependencies }: { dependencies: AppDependencies }) {
     );
   }
 
-  return <JoinScreen busy={busy} error={state.error} onJoin={(name) => void join(name)} />;
+  return (
+    <JoinScreen
+      busy={busy}
+      error={state.error}
+      progressMessage={progressMessage(state)}
+      onJoin={(name) => void join(name)}
+    />
+  );
 }
 
 export function App({ dependencies = defaultDependencies }: { dependencies?: AppDependencies }) {

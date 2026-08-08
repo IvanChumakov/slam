@@ -1,6 +1,6 @@
 # Web Voice Client Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Build the responsive React web client that joins a LiveKit audio room from `/join/:token` and supports participants, remote audio, mute, leave, reconnect, mock API development, and recoverable errors.
 
@@ -39,7 +39,7 @@
 **Interfaces:**
 - Produces: `JoinScreen({ busy, error, onJoin })`, where `onJoin(trimmedDisplayName: string): void` receives a non-empty name of at most 32 characters.
 
-- [ ] **Step 1: Add the test/lint/build toolchain**
+- [x] **Step 1: Add the test/lint/build toolchain**
 
 Create `package.json` with scripts `dev`, `build`, `lint`, and `test`; pin the versions from the plan header. Configure Vite with React and jsdom tests, strict TypeScript project references, Testing Library setup, and flat ESLint rules for TypeScript and React hooks. `index.html` must contain `<div id="root"></div>` and load `/src/main.tsx`.
 
@@ -82,7 +82,7 @@ Create `package.json` with scripts `dev`, `build`, `lint`, and `test`; pin the v
 }
 ```
 
-- [ ] **Step 2: Write the failing join-form tests**
+- [x] **Step 2: Write the failing join-form tests**
 
 ```tsx
 import { render, screen } from '@testing-library/react';
@@ -114,13 +114,13 @@ describe('JoinScreen', () => {
 });
 ```
 
-- [ ] **Step 3: Run the test and verify RED**
+- [x] **Step 3: Run the test and verify RED**
 
 Run: `cd frontend && npm install && npm test -- src/components/JoinScreen.test.tsx`
 
 Expected: FAIL because `./JoinScreen` does not exist.
 
-- [ ] **Step 4: Implement the minimal accessible form**
+- [x] **Step 4: Implement the minimal accessible form**
 
 ```tsx
 import { FormEvent, useState } from 'react';
@@ -171,7 +171,7 @@ export function JoinScreen({ busy, error, onJoin }: JoinScreenProps) {
 }
 ```
 
-- [ ] **Step 5: Verify GREEN and commit**
+- [x] **Step 5: Verify GREEN and commit**
 
 Run: `cd frontend && npm test -- src/components/JoinScreen.test.tsx && npm run lint`
 
@@ -191,7 +191,7 @@ Commit: `git add frontend && git commit -m "feat(frontend): scaffold join form"`
 - Produces: `VoiceApi.join(joinToken: string, displayName: string): Promise<JoinVoiceResponse>`.
 - Produces: `createVoiceApi(config, fetchImpl)` with explicit config for deterministic tests.
 
-- [ ] **Step 1: Write failing HTTP and mock-contract tests**
+- [x] **Step 1: Write failing HTTP and mock-contract tests**
 
 ```ts
 import { describe, expect, it, vi } from 'vitest';
@@ -241,13 +241,13 @@ describe('createVoiceApi', () => {
 });
 ```
 
-- [ ] **Step 2: Run the test and verify RED**
+- [x] **Step 2: Run the test and verify RED**
 
 Run: `cd frontend && npm test -- src/api/voiceApi.test.ts`
 
 Expected: FAIL because `createVoiceApi` does not exist.
 
-- [ ] **Step 3: Implement the contract, status mapping, and mock**
+- [x] **Step 3: Implement the contract, status mapping, and mock**
 
 ```ts
 export type JoinVoiceResponse = {
@@ -320,7 +320,7 @@ export function createVoiceApi(
 }
 ```
 
-- [ ] **Step 4: Verify GREEN and commit**
+- [x] **Step 4: Verify GREEN and commit**
 
 Run: `cd frontend && npm test -- src/api/voiceApi.test.ts && npm test`
 
@@ -343,13 +343,13 @@ Commit: `git add frontend/src/api && git commit -m "feat(frontend): add voice jo
 - Produces: `VoiceClient` with `subscribe`, `connect`, `enableMicrophone`, `setMuted`, `enableAudio`, and `disconnect`.
 - Produces: `useVoiceRoom({ token, api, createClient })` returning `{ state, join, leave, setMuted, enableAudio, reset }`.
 
-- [ ] **Step 1: Refresh and inspect teammates' commits**
+- [x] **Step 1: Refresh and inspect teammates' commits**
 
 Run: `git fetch --all --prune && git log --all -20 --oneline --decorate`
 
 Expected: inspect any commits newer than the current base; do not merge automatically. If the shared API differs, stop and report the incompatible fields before editing.
 
-- [ ] **Step 2: Define the voice boundary and write failing hook tests**
+- [x] **Step 2: Define the voice boundary and write failing hook tests**
 
 ```ts
 export type VoiceParticipant = {
@@ -444,13 +444,13 @@ describe('useVoiceRoom', () => {
 });
 ```
 
-- [ ] **Step 3: Run the hook test and verify RED**
+- [x] **Step 3: Run the hook test and verify RED**
 
 Run: `cd frontend && npm test -- src/voice/useVoiceRoom.test.tsx`
 
 Expected: FAIL because `useVoiceRoom` does not exist.
 
-- [ ] **Step 4: Implement the state machine and error mapping**
+- [x] **Step 4: Implement the state machine and error mapping**
 
 Implement `useVoiceRoom` with a synchronous `joiningRef` guard, one client per
 join, a subscription cleanup ref, and a leaving ref. State must contain:
@@ -490,7 +490,7 @@ the phase for reconnecting, reconnected, and unexpected disconnected events.
 `leave` marks intentional exit before disconnecting so the disconnect event
 cannot overwrite `left` with an error.
 
-- [ ] **Step 5: Verify GREEN and commit**
+- [x] **Step 5: Verify GREEN and commit**
 
 Run: `cd frontend && npm test -- src/voice/useVoiceRoom.test.tsx && npm test`
 
@@ -510,7 +510,7 @@ Commit: `git add frontend/src/voice && git commit -m "feat(frontend): add voice 
 - Consumes: `VoiceClient`, `VoiceSnapshot`, and `VoiceParticipant` from Task 3.
 - Produces: `new LiveKitVoiceClient()` implementing the complete `VoiceClient` interface.
 
-- [ ] **Step 1: Write failing adapter tests around an injected room port**
+- [x] **Step 1: Write failing adapter tests around an injected room port**
 
 Create a minimal fake room with event registration, local/remote participant
 maps, `connect`, `disconnect`, `startAudio`, and local
@@ -565,13 +565,13 @@ it('removes all listeners and detaches tracks on disconnect', async () => {
 });
 ```
 
-- [ ] **Step 2: Run the adapter test and verify RED**
+- [x] **Step 2: Run the adapter test and verify RED**
 
 Run: `cd frontend && npm test -- src/voice/LiveKitVoiceClient.test.ts`
 
 Expected: FAIL because `LiveKitVoiceClient` does not exist.
 
-- [ ] **Step 3: Implement the LiveKit adapter**
+- [x] **Step 3: Implement the LiveKit adapter**
 
 Use `Room`, `RoomEvent`, and `Track.Source.Microphone`. Register handlers for
 `ParticipantConnected`, `ParticipantDisconnected`, `TrackSubscribed`,
@@ -603,7 +603,7 @@ function participantView(participant: Participant, isLocal: boolean): VoiceParti
 `room.localParticipant.setMicrophoneEnabled(!muted)` and then emits a snapshot.
 Do not call `connect` from reconnect events; LiveKit owns reconnection.
 
-- [ ] **Step 4: Verify GREEN and commit**
+- [x] **Step 4: Verify GREEN and commit**
 
 Run: `cd frontend && npm test -- src/voice/LiveKitVoiceClient.test.ts && npm test && npm run lint`
 
@@ -628,7 +628,7 @@ Commit: `git add frontend/src/voice && git commit -m "feat(frontend): integrate 
 - Consumes: `JoinScreen`, `useVoiceRoom`, and `LiveKitVoiceClient`.
 - Produces: route `/join/:token`, connected room UI, missing-token error, post-leave UI, and all user controls.
 
-- [ ] **Step 1: Write failing room-control tests**
+- [x] **Step 1: Write failing room-control tests**
 
 ```tsx
 import { render, screen } from '@testing-library/react';
@@ -666,7 +666,7 @@ it('offers audio recovery and leave', async () => {
 });
 ```
 
-- [ ] **Step 2: Write failing route-flow tests**
+- [x] **Step 2: Write failing route-flow tests**
 
 Render `App` inside `MemoryRouter` with injected fake `VoiceApi` and
 `VoiceClient`. Assert `/join/signed-token` submits the URL token, renders room
@@ -674,13 +674,13 @@ name `General` after join, renders `You left the room` after Leave, and restores
 the join screen after `Join Again`. Assert `/` renders `Invalid or expired
 invite.` and never calls the API.
 
-- [ ] **Step 3: Run UI tests and verify RED**
+- [x] **Step 3: Run UI tests and verify RED**
 
 Run: `cd frontend && npm test -- src/components/VoiceRoom.test.tsx src/App.test.tsx`
 
 Expected: FAIL because `VoiceRoom` and `App` do not exist.
 
-- [ ] **Step 4: Implement focused presentation components and route flow**
+- [x] **Step 4: Implement focused presentation components and route flow**
 
 `Participant` renders initials, display name, `(you)` for local users, and an
 accessible `🎤` or `🔇` state. `ConnectionStatus` renders `Connected`,
@@ -706,7 +706,7 @@ return <JoinScreen busy={[
 
 `main.tsx` renders `App` inside `BrowserRouter` and imports `styles.css`.
 
-- [ ] **Step 5: Verify GREEN and commit**
+- [x] **Step 5: Verify GREEN and commit**
 
 Run: `cd frontend && npm test && npm run lint`
 
@@ -728,14 +728,14 @@ Commit: `git add frontend/src && git commit -m "feat(frontend): add voice room i
 - Consumes: all prior frontend behavior.
 - Produces: production build, documented mock/real modes, accessible mobile-first dark UI, and an explicit manual integration checklist.
 
-- [ ] **Step 1: Refresh and inspect teammates' commits again**
+- [x] **Step 1: Refresh and inspect teammates' commits again**
 
 Run: `git fetch --all --prune && git log --all -20 --oneline --decorate`
 
 Expected: inspect new commits and verify `POST /api/voice/join` still matches
 `JoinVoiceResponse`. Do not modify teammates' files or merge unrelated work.
 
-- [ ] **Step 2: Add a failing environment-wiring test**
+- [x] **Step 2: Add a failing environment-wiring test**
 
 Add an `App` test that supplies the production environment factory, submits
 `Ivan`, and asserts the fetch request URL combines `VITE_API_URL` with
@@ -748,7 +748,7 @@ Expected: FAIL until `App` exports and uses an environment-to-dependencies
 factory that reads `VITE_API_URL`, `VITE_USE_MOCK_API`,
 `VITE_DEV_LIVEKIT_URL`, and `VITE_DEV_LIVEKIT_TOKEN`.
 
-- [ ] **Step 3: Wire environment configuration and verify GREEN**
+- [x] **Step 3: Wire environment configuration and verify GREEN**
 
 Implement the factory with `VITE_USE_MOCK_API === 'true'`, an empty-string
 fallback for `VITE_API_URL`, and optional dev LiveKit values. Do not read or
@@ -758,7 +758,7 @@ Run: `cd frontend && npm test -- src/App.test.tsx && npm test`
 
 Expected: environment tests and the full suite pass.
 
-- [ ] **Step 4: Add the dark responsive design**
+- [x] **Step 4: Add the dark responsive design**
 
 Define CSS custom properties for charcoal page/panel colors, blue-violet
 primary actions, green status, red danger, muted text, borders, and focus rings.
@@ -767,7 +767,7 @@ a panel max width of 520px, 48px minimum controls, visible `:focus-visible`,
 stacked mobile actions, and a desktop media query at 640px. Include
 `prefers-reduced-motion: reduce` and do not hide status text by color alone.
 
-- [ ] **Step 5: Document environment and manual integration checks**
+- [x] **Step 5: Document environment and manual integration checks**
 
 Create `.env.example` containing only:
 
@@ -783,7 +783,7 @@ and manual checks for two browsers, remote audio, microphone denial and retry,
 mute/unmute, participant leave, autoplay recovery, reconnect, invalid token,
 backend failure, Android browser, and iPhone browser.
 
-- [ ] **Step 6: Run final automated verification**
+- [x] **Step 6: Run final automated verification**
 
 Run: `cd frontend && npm test && npm run lint && npm run build`
 
@@ -796,7 +796,7 @@ Expected: no whitespace errors; changed source files are confined to
 `frontend/` plus `docs/superpowers/`; `frontend/dist/` and `node_modules/` are
 not tracked.
 
-- [ ] **Step 7: Commit the completed frontend**
+- [x] **Step 7: Commit the completed frontend**
 
 Commit: `git add frontend docs/superpowers && git commit -m "docs(frontend): document voice client setup"`
 

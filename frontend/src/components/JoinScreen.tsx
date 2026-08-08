@@ -4,10 +4,16 @@ import type { FormEvent } from 'react';
 type JoinScreenProps = {
   busy: boolean;
   error: string | null;
+  progressMessage?: string;
   onJoin: (displayName: string) => void;
 };
 
-export function JoinScreen({ busy, error, onJoin }: JoinScreenProps) {
+export function JoinScreen({
+  busy,
+  error,
+  progressMessage,
+  onJoin,
+}: JoinScreenProps) {
   const [name, setName] = useState('');
   const [validationError, setValidationError] = useState<string | null>(null);
   const errorText = validationError ?? error;
@@ -50,7 +56,9 @@ export function JoinScreen({ busy, error, onJoin }: JoinScreenProps) {
           maxLength={32}
           autoComplete="nickname"
           placeholder="Ivan"
-          aria-describedby={errorText ? 'join-error' : undefined}
+          aria-describedby={
+            errorText ? 'join-error' : progressMessage ? 'join-progress' : undefined
+          }
           aria-invalid={Boolean(errorText)}
           disabled={busy}
           autoFocus
@@ -60,8 +68,14 @@ export function JoinScreen({ busy, error, onJoin }: JoinScreenProps) {
             {errorText}
           </p>
         ) : null}
+        {progressMessage ? (
+          <p className="join-progress" id="join-progress" role="status">
+            <span className="progress-spinner" aria-hidden="true" />
+            {progressMessage}
+          </p>
+        ) : null}
         <button className="button button-primary" disabled={busy} type="submit">
-          {busy ? 'Connecting…' : 'Join voice'}
+          {busy ? 'Connecting…' : error ? 'Try again' : 'Join voice'}
         </button>
       </form>
     </section>
