@@ -6,7 +6,7 @@
 
 **Architecture:** Keep all implementation under `frontend/`. A typed API adapter owns the fixed backend contract, a `VoiceClient` interface isolates LiveKit, and `useVoiceRoom` owns the connection state machine; React components only render state and call commands.
 
-**Tech Stack:** React 19.2.8, TypeScript 7.0.2, Vite 8.2.1, React Router 7.18.2, LiveKit Client 2.21.0, Vitest 4.1.10, React Testing Library 16.3.2, ESLint 10.8.1, plain CSS.
+**Tech Stack:** React 19.2.8, TypeScript 6.0.3, Vite 8.2.1, React Router 7.18.2, LiveKit Client 2.21.0, Vitest 4.1.10, React Testing Library 16.3.2, ESLint 10.8.1, plain CSS.
 
 ## Global Constraints
 
@@ -74,7 +74,7 @@ Create `package.json` with scripts `dev`, `build`, `lint`, and `test`; pin the v
     "eslint-plugin-react-refresh": "0.5.3",
     "globals": "17.9.0",
     "jsdom": "30.0.1",
-    "typescript": "7.0.2",
+    "typescript": "6.0.3",
     "typescript-eslint": "8.66.0",
     "vite": "8.2.1",
     "vitest": "4.1.10"
