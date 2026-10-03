@@ -1,0 +1,19 @@
+port: 7880
+bind_addresses: ["0.0.0.0"]
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: true
+  allow_tcp_fallback: true
+room:
+  auto_create: true
+  empty_timeout: 300
+  departure_timeout: 20
+  enabled_codecs:
+    - mime: audio/opus
+logging:
+  level: info
+  pion_level: warn
+webhook:
+  api_key: serverkey
+  urls: [http://api:8000/api/livekit/webhook]

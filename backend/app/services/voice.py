@@ -36,10 +36,18 @@ class VoiceService:
         self.livekit_url = livekit_url
 
     async def ensure_general_room(
-        self, session: AsyncSession, *, telegram_chat_id: int, title: str
+        self,
+        session: AsyncSession,
+        *,
+        telegram_chat_id: int,
+        title: str,
+        telegram_thread_id: int = 0,
     ) -> VoiceRoom:
         return await self.repository.ensure_general_room(
-            session, telegram_chat_id=telegram_chat_id, title=title
+            session,
+            telegram_chat_id=telegram_chat_id,
+            title=title,
+            telegram_thread_id=telegram_thread_id,
         )
 
     async def join(

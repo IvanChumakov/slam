@@ -4,6 +4,7 @@ import {
   Track,
   type Participant,
   type RemoteTrack,
+  type RoomOptions,
 } from 'livekit-client';
 import type {
   VoiceClient,
@@ -12,7 +13,7 @@ import type {
   VoiceSnapshot,
 } from './types';
 
-type RoomFactory = () => Room;
+type RoomFactory = (options: RoomOptions) => Room;
 
 function toParticipant(participant: Participant, isLocal: boolean): VoiceParticipant {
   const microphone = participant.getTrackPublication(Track.Source.Microphone);
@@ -33,8 +34,13 @@ export class LiveKitVoiceClient implements VoiceClient {
   private audioRoot: HTMLDivElement | null = null;
   private eventsRegistered = false;
 
-  constructor(createRoom: RoomFactory = () => new Room({ adaptiveStream: true })) {
-    this.room = createRoom();
+  constructor(createRoom: RoomFactory = (options) => new Room(options)) {
+    this.room = createRoom({
+      adaptiveStream: true,
+      // Keep publishing and subscribing separate: Firefox can reject the
+      // single-PC media layout during microphone/subscription renegotiation.
+      singlePeerConnection: false,
+    });
   }
 
   subscribe(listener: (snapshot: VoiceSnapshot) => void) {

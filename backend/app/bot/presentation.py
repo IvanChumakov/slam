@@ -10,5 +10,8 @@ def room_message(name: str, online_count: int, participant_names: tuple[str, ...
 
 def join_keyboard(join_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="🎧 Join Voice", url=join_url)]]
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🎧 Войти в комнату", url=join_url)],
+            [InlineKeyboardButton(text="🔗 Получить ссылку ещё раз", callback_data="voice:link")],
+        ]
     )

@@ -20,6 +20,11 @@ npm run dev
 
 Open `http://localhost:5173/join/<signed-token>`.
 
+For the recommended Docker-based full-stack setup (including a generated local
+invite and real LiveKit audio), see [`../LOCAL_DEVELOPMENT.md`](../LOCAL_DEVELOPMENT.md).
+It uses Node 24 in Docker, so no compatible Node.js installation is required on
+the host.
+
 ## Environment
 
 ```dotenv

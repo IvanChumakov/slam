@@ -1,0 +1,22 @@
+{$PUBLIC_HOST} {
+    handle /api/* {
+        reverse_proxy api:8000
+    }
+    handle /health {
+        reverse_proxy api:8000
+    }
+    handle /ready {
+        reverse_proxy api:8000
+    }
+    handle_path /livekit/* {
+        reverse_proxy livekit:7880
+    }
+    handle {
+        reverse_proxy frontend:80
+    }
+}
+
+# Preserve existing Telegram invitations while using the custom domain.
+5-42-102-94.sslip.io {
+    redir https://{$PUBLIC_HOST}{uri} permanent
+}

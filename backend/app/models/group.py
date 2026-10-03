@@ -18,6 +18,6 @@ class TelegramGroup(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    room: Mapped["VoiceRoom"] = relationship(  # noqa: F821
-        back_populates="group", cascade="all, delete-orphan", uselist=False
+    rooms: Mapped[list["VoiceRoom"]] = relationship(  # noqa: F821
+        back_populates="group", cascade="all, delete-orphan"
     )

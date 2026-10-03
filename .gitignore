@@ -1,5 +1,9 @@
 # Shared repository artifacts
 .DS_Store
+creds.txt
+.bot-token
+.server-access.tcl
+.playwright-cli/
 .env
 .env.*
 !.env.example

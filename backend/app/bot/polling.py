@@ -1,6 +1,9 @@
 import asyncio
 import logging
 
+from aiogram.exceptions import TelegramAPIError
+
+from app.bot.commands import register_commands
 from app.bot.runtime import create_dispatcher
 from app.config import get_settings
 from app.db.repositories import RoomRepository
@@ -31,6 +34,12 @@ async def run() -> None:
         voice_service=voice_service,
     )
     try:
+        try:
+            await register_commands(bot)
+        except TelegramAPIError:
+            logging.getLogger(__name__).warning(
+                "Could not register command menu; continuing polling", exc_info=True
+            )
         await dispatcher.start_polling(bot)
     finally:
         await bot.session.close()

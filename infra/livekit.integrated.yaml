@@ -1,0 +1,33 @@
+# Local full-stack configuration. Unlike livekit.yaml, webhooks are delivered
+# to the real backend so participant presence can be tested end to end.
+
+port: 7880
+bind_addresses:
+  - "0.0.0.0"
+
+rtc:
+  node_ip: 127.0.0.1
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: false
+  allow_tcp_fallback: true
+
+room:
+  auto_create: true
+  empty_timeout: 300
+  departure_timeout: 20
+  enabled_codecs:
+    - mime: audio/opus
+
+logging:
+  level: info
+  pion_level: warn
+  json: false
+
+webhook:
+  api_key: devkey
+  urls:
+    - http://api:8000/api/livekit/webhook
+
+turn:
+  enabled: false

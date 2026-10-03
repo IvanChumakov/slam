@@ -1,0 +1,84 @@
+name: slam-server
+
+x-backend: &backend
+  build: ./backend
+  image: slam-backend:server
+  env_file: .env.server
+  extra_hosts:
+    - "api.telegram.org:${TELEGRAM_API_IP:-149.154.167.220}"
+  restart: unless-stopped
+  init: true
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+
+services:
+  db:
+    image: postgres:17-alpine
+    env_file: .env.server
+    restart: unless-stopped
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    <<: *backend
+    command: [alembic, upgrade, head]
+    restart: "no"
+    healthcheck: {disable: true}
+    depends_on:
+      db: {condition: service_healthy}
+
+  api:
+    <<: *backend
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  bot:
+    <<: *backend
+    command: [python, -m, app.bot.polling]
+    healthcheck: {disable: true}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.server
+    restart: unless-stopped
+
+  livekit:
+    image: livekit/livekit-server:v1.13.1
+    command: [--config, /etc/livekit.yaml]
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    volumes: [./infra/livekit.server.yaml:/etc/livekit.yaml:ro]
+    ports: ["7881:7881", "7882:7882/udp"]
+    restart: unless-stopped
+    depends_on:
+      api: {condition: service_healthy}
+
+  proxy:
+    image: caddy:2-alpine
+    env_file: .env.server
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - ./infra/Caddyfile.server:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    depends_on: [api, frontend, livekit]
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

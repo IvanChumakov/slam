@@ -2,6 +2,10 @@
 
 Локальный стенд LiveKit для Telegram Voice MVP. Он предназначен для независимой проверки WebRTC-аудио до готовности Telegram-бота, backend и основного frontend.
 
+Для macOS/Linux и интегрированного запуска с реальными frontend и backend
+используйте [`../LOCAL_DEVELOPMENT.md`](../LOCAL_DEVELOPMENT.md). Существующий
+Compose в этой папке остаётся независимым infra-only стендом.
+
 ## Что входит в текущий стенд
 
 - LiveKit Server `v1.13.1`;

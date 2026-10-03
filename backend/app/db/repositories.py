@@ -1,12 +1,12 @@
 from dataclasses import dataclass
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models import RoomParticipant, TelegramGroup, VoiceRoom
+from app.models import RoomParticipant, TelegramGroup, TelegramTopic, VoiceRoom
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,23 +18,83 @@ class RoomPresence:
 
 class RoomRepository:
     async def ensure_general_room(
-        self, session: AsyncSession, *, telegram_chat_id: int, title: str
+        self,
+        session: AsyncSession,
+        *,
+        telegram_chat_id: int,
+        title: str,
+        telegram_thread_id: int = 0,
     ) -> VoiceRoom:
         group = await self._upsert_group(session, telegram_chat_id=telegram_chat_id, title=title)
-        room = await session.scalar(select(VoiceRoom).where(VoiceRoom.group_id == group.id))
+        topic = await session.get(TelegramTopic, (telegram_chat_id, telegram_thread_id))
+        name = topic.name if topic else ("Голосовая комната" if telegram_thread_id else "General")
+        room_query = select(VoiceRoom).where(
+            VoiceRoom.group_id == group.id,
+            VoiceRoom.telegram_thread_id == telegram_thread_id,
+        )
+        room = await session.scalar(room_query)
         if room is None:
             statement = self._insert_for(session, VoiceRoom).values(
                 group_id=group.id,
-                name="General",
-                livekit_room_name=f"telegram_{abs(telegram_chat_id)}_general",
+                telegram_thread_id=telegram_thread_id,
+                name=name,
+                livekit_room_name=(
+                    f"telegram_{abs(telegram_chat_id)}_topic_{telegram_thread_id}"
+                    if telegram_thread_id
+                    else f"telegram_{abs(telegram_chat_id)}_general"
+                ),
             )
-            statement = statement.on_conflict_do_nothing(index_elements=["group_id"])
+            statement = statement.on_conflict_do_nothing(
+                index_elements=["group_id", "telegram_thread_id"]
+            )
             await session.execute(statement)
             await session.flush()
-            room = await session.scalar(select(VoiceRoom).where(VoiceRoom.group_id == group.id))
+            room = await session.scalar(room_query)
         if room is None:  # pragma: no cover - database invariant guard
             raise RuntimeError("failed to create the General voice room")
+        room.name = name
         return room
+
+    async def remember_topic_name(
+        self,
+        session: AsyncSession,
+        *,
+        telegram_chat_id: int,
+        telegram_thread_id: int,
+        name: str,
+        overwrite: bool = True,
+    ) -> int | None:
+        statement = self._insert_for(session, TelegramTopic).values(
+            telegram_chat_id=telegram_chat_id,
+            telegram_thread_id=telegram_thread_id,
+            name=name,
+        )
+        keys = ["telegram_chat_id", "telegram_thread_id"]
+        statement = (
+            statement.on_conflict_do_update(index_elements=keys, set_={"name": name})
+            if overwrite
+            else statement.on_conflict_do_nothing(index_elements=keys)
+        )
+        await session.execute(statement)
+        current_name = await session.scalar(
+            select(TelegramTopic.name).where(
+                TelegramTopic.telegram_chat_id == telegram_chat_id,
+                TelegramTopic.telegram_thread_id == telegram_thread_id,
+            )
+        )
+        room_id = await session.scalar(
+            select(VoiceRoom.id)
+            .join(TelegramGroup)
+            .where(
+                TelegramGroup.telegram_chat_id == telegram_chat_id,
+                VoiceRoom.telegram_thread_id == telegram_thread_id,
+            )
+        )
+        if room_id is not None:
+            await session.execute(
+                update(VoiceRoom).where(VoiceRoom.id == room_id).values(name=current_name)
+            )
+        return room_id
 
     async def _upsert_group(
         self, session: AsyncSession, *, telegram_chat_id: int, title: str
@@ -56,7 +116,9 @@ class RoomRepository:
         return group
 
     @staticmethod
-    def _insert_for(session: AsyncSession, model: type[TelegramGroup] | type[VoiceRoom]):
+    def _insert_for(
+        session: AsyncSession, model: type[TelegramGroup] | type[VoiceRoom] | type[TelegramTopic]
+    ):
         if session.bind is not None and session.bind.dialect.name == "sqlite":
             return sqlite_insert(model)
         return pg_insert(model)

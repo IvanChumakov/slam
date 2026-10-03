@@ -42,6 +42,17 @@ function createRoom() {
 }
 
 describe('LiveKitVoiceClient', () => {
+  it('uses separate publishing and subscribing connections across browsers', () => {
+    const fake = createRoom();
+    const factory = vi.fn(() => fake.room);
+    new LiveKitVoiceClient(factory);
+
+    expect(factory).toHaveBeenCalledWith({
+      adaptiveStream: true,
+      singlePeerConnection: false,
+    });
+  });
+
   it('connects with backend credentials and enables the microphone', async () => {
     const fake = createRoom();
     const client = new LiveKitVoiceClient(() => fake.room);

@@ -7,6 +7,10 @@ bind_addresses:
   - "0.0.0.0"
 
 rtc:
+  # Docker Desktop publishes the RTC ports on the host. Advertising localhost
+  # keeps same-machine browsers away from the container-only bridge address.
+  node_ip: 127.0.0.1
+
   # TCP fallback when a client cannot establish an UDP media connection.
   tcp_port: 7881
 

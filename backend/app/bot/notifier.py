@@ -49,6 +49,7 @@ class TelegramRoomNotifier:
                 logger.warning("Room message could not be edited; creating a replacement")
                 sent = await self._bot.send_message(
                     chat_id=room.group.telegram_chat_id,
+                    message_thread_id=room.telegram_thread_id or None,
                     text=text,
                     reply_markup=markup,
                 )
