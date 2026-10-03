@@ -1,4 +1,5 @@
 import type { VoiceParticipant } from '../voice/types';
+import { RoomIcon } from './RoomIcon';
 
 function initials(name: string) {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -14,20 +15,21 @@ export function Participant({ participant }: { participant: VoiceParticipant }) 
   }`;
 
   return (
-    <li className={participant.isLocal ? 'participant participant-local' : 'participant'}>
+    <li className={`participant${participant.isLocal ? ' participant-local' : ''}${participant.isSpeaking ? ' participant-speaking' : ''}`}>
       <span className="participant-avatar" aria-hidden="true">
         {initials(participant.displayName) || '•'}
       </span>
       <span className="participant-identity">
         <span className="participant-name">{participant.displayName}</span>
         {participant.isLocal ? <span className="participant-you">(you)</span> : null}
+        {participant.isSpeaking ? <span className="speaking-label">Speaking</span> : null}
       </span>
       <span
         className={participant.isMuted ? 'mic-state mic-state-muted' : 'mic-state'}
         role="img"
         aria-label={microphoneLabel}
       >
-        {participant.isMuted ? '🔇' : '🎤'}
+        <RoomIcon name="mic" off={participant.isMuted} />
       </span>
     </li>
   );

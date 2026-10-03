@@ -8,11 +8,15 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.api.dependencies import SessionDependency
 from app.schemas.voice import (
     HealthResponse,
+    InviteRequest,
+    InviteResponse,
     JoinRequest,
     JoinResponse,
     ParticipantInfo,
     RoomInfo,
     RoomResponse,
+    RoomsRequest,
+    RoomsResponse,
 )
 from app.services.tokens import InvalidJoinToken
 from app.services.voice import RoomNotFound
@@ -78,6 +82,67 @@ async def join_voice(
         access_token=result.access_token,
         room=RoomInfo(id=result.room.id, name=result.room.name),
         participant=ParticipantInfo(identity=result.identity, display_name=result.display_name),
+    )
+
+
+@router.post(
+    "/api/voice/rooms",
+    response_model=RoomsResponse,
+    responses={
+        401: {"description": "Invalid or expired invite"},
+        404: {"description": "Room not found"},
+    },
+    tags=["voice"],
+)
+async def voice_rooms(
+    payload: RoomsRequest, request: Request, session: SessionDependency
+) -> RoomsResponse:
+    try:
+        current_room_id, rooms = await request.app.state.voice_service.list_rooms(
+            session, join_token=payload.join_token
+        )
+    except InvalidJoinToken as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired invite"
+        ) from exc
+    except RoomNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Room not found") from exc
+    return RoomsResponse(
+        current_room_id=current_room_id,
+        rooms=[
+            RoomResponse(id=room.id, name=room.name, online_count=count) for room, count in rooms
+        ],
+    )
+
+
+@router.post(
+    "/api/voice/invite",
+    response_model=InviteResponse,
+    responses={
+        401: {"description": "Invalid or expired invite"},
+        404: {"description": "Room not found"},
+    },
+    tags=["voice"],
+)
+async def voice_invite(
+    payload: InviteRequest, request: Request, session: SessionDependency
+) -> InviteResponse:
+    try:
+        room, token = await request.app.state.voice_service.create_invite(
+            session, join_token=payload.join_token, room_id=payload.room_id
+        )
+    except InvalidJoinToken as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired invite"
+        ) from exc
+    except RoomNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Room not found") from exc
+    settings = request.app.state.settings
+    return InviteResponse(
+        join_token=token,
+        join_url=f"{str(settings.frontend_public_url).rstrip('/')}/join/{token}",
+        room=RoomInfo(id=room.id, name=room.name),
+        expires_in=settings.join_token_ttl_seconds,
     )
 
 

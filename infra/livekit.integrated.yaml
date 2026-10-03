@@ -18,6 +18,8 @@ room:
   departure_timeout: 20
   enabled_codecs:
     - mime: audio/opus
+    - mime: video/vp8
+    - mime: video/h264
 
 logging:
   level: info

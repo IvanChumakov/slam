@@ -50,7 +50,11 @@ async def test_topic_creation_rename_and_repeated_voice(app_context: tuple) -> N
         bot,
         Update(update_id=2, message=topic_message(100, text="/voice", reply_to_message=starter)),
     )
-    request = transport.await_args.args[1]
+    request = next(
+        call.args[1]
+        for call in reversed(transport.await_args_list)
+        if isinstance(call.args[1], SendMessage)
+    )
     assert isinstance(request, SendMessage)
     assert request.text.startswith("🔊 Игры 🎮")
     assert request.message_thread_id == 42
@@ -73,7 +77,12 @@ async def test_topic_creation_rename_and_repeated_voice(app_context: tuple) -> N
         bot,
         Update(update_id=4, message=topic_message(102, text="/voice", reply_to_message=starter)),
     )
-    assert transport.await_args.args[1].text.startswith("🔊 Работа")
+    request = next(
+        call.args[1]
+        for call in reversed(transport.await_args_list)
+        if isinstance(call.args[1], SendMessage)
+    )
+    assert request.text.startswith("🔊 Работа")
     await dispatcher.feed_update(
         bot,
         Update(
@@ -99,7 +108,12 @@ async def test_old_topic_name_can_be_read_from_starter(app_context: tuple) -> No
         bot,
         Update(update_id=1, message=topic_message(100, text="/voice", reply_to_message=starter)),
     )
-    assert transport.await_args.args[1].text.startswith("🔊 Музыка")
+    request = next(
+        call.args[1]
+        for call in reversed(transport.await_args_list)
+        if isinstance(call.args[1], SendMessage)
+    )
+    assert request.text.startswith("🔊 Музыка")
 
 
 async def test_topic_names_are_scoped_to_group(app_context: tuple, session) -> None:

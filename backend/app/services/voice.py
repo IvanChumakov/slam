@@ -53,10 +53,7 @@ class VoiceService:
     async def join(
         self, session: AsyncSession, *, join_token: str, display_name: str
     ) -> JoinResult:
-        claims = self.join_tokens.verify_join_token(join_token)
-        room = await self.repository.get_room_with_group(session, claims.room_id)
-        if room is None or room.group.telegram_chat_id != claims.telegram_chat_id:
-            raise RoomNotFound("voice room not found")
+        room = await self._validate_source_room(session, join_token)
         identity = f"guest_{uuid4().hex}"
         access_token = self.livekit_tokens.generate_livekit_token(
             room_name=room.livekit_room_name,
@@ -70,6 +67,32 @@ class VoiceService:
             identity=identity,
             display_name=display_name,
         )
+
+    async def _validate_source_room(self, session: AsyncSession, join_token: str) -> VoiceRoom:
+        claims = self.join_tokens.verify_join_token(join_token)
+        room = await self.repository.get_room_with_group(session, claims.room_id)
+        if room is None or room.group.telegram_chat_id != claims.telegram_chat_id:
+            raise RoomNotFound("voice room not found")
+        return room
+
+    async def list_rooms(
+        self, session: AsyncSession, *, join_token: str
+    ) -> tuple[int, list[tuple[VoiceRoom, int]]]:
+        source = await self._validate_source_room(session, join_token)
+        rooms = await self.repository.list_rooms_with_counts(session, source.group_id)
+        return source.id, rooms
+
+    async def create_invite(
+        self, session: AsyncSession, *, join_token: str, room_id: int
+    ) -> tuple[VoiceRoom, str]:
+        source = await self._validate_source_room(session, join_token)
+        target = await self.repository.get_room_in_group(
+            session, room_id=room_id, group_id=source.group_id
+        )
+        if target is None:
+            raise RoomNotFound("voice room not found")
+        token = self.join_tokens.create_join_token(target.id, source.group.telegram_chat_id)
+        return target, token
 
 
 __all__ = ["InvalidJoinToken", "JoinResult", "RoomNotFound", "VoiceService"]

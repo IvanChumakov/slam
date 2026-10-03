@@ -131,6 +131,29 @@ class RoomRepository:
             select(VoiceRoom).options(selectinload(VoiceRoom.group)).where(VoiceRoom.id == room_id)
         )
 
+    async def get_room_in_group(
+        self, session: AsyncSession, *, room_id: int, group_id: int
+    ) -> VoiceRoom | None:
+        return await session.scalar(
+            select(VoiceRoom).where(VoiceRoom.id == room_id, VoiceRoom.group_id == group_id)
+        )
+
+    async def list_rooms_with_counts(
+        self, session: AsyncSession, group_id: int
+    ) -> list[tuple[VoiceRoom, int]]:
+        rows = await session.execute(
+            select(VoiceRoom, func.count(RoomParticipant.id))
+            .outerjoin(RoomParticipant, RoomParticipant.room_id == VoiceRoom.id)
+            .where(VoiceRoom.group_id == group_id)
+            .group_by(VoiceRoom.id)
+            .order_by(
+                (VoiceRoom.telegram_thread_id == 0).desc(),
+                VoiceRoom.telegram_thread_id,
+                VoiceRoom.id,
+            )
+        )
+        return [(room, int(count)) for room, count in rows]
+
     async def get_room_by_livekit_name(
         self, session: AsyncSession, livekit_room_name: str
     ) -> VoiceRoom | None:

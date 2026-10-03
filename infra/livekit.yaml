@@ -28,6 +28,8 @@ room:
   departure_timeout: 20
   enabled_codecs:
     - mime: audio/opus
+    - mime: video/vp8
+    - mime: video/h264
 
 logging:
   level: info
@@ -41,7 +43,7 @@ webhook:
   urls:
     - http://webhook-receiver:8080/webhook
 
-# Embedded TURN is enabled only in staging, where a public TURN domain and a
-# trusted TLS certificate are available.
+# Embedded TURN stays disabled locally. The server opt-in uses external coturn
+# with a public domain and trusted TLS certificate; staging is separate.
 turn:
   enabled: false

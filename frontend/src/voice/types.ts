@@ -5,6 +5,7 @@ export type VoiceParticipant = {
   displayName: string;
   isLocal: boolean;
   isMuted: boolean;
+  isSpeaking: boolean;
 };
 
 export type VoiceSnapshot = {
@@ -12,6 +13,21 @@ export type VoiceSnapshot = {
   participants: VoiceParticipant[];
   localMuted: boolean;
   needsAudioPermission: boolean;
+  incomingMuted: boolean;
+  localSharing: boolean;
+  screenShareSupported: boolean;
+  screens: VoiceScreen[];
+  localCamera: boolean;
+  cameraSupported: boolean;
+  cameras: VoiceScreen[];
+};
+
+export type VoiceScreen = {
+  id: string;
+  participantIdentity: string;
+  displayName: string;
+  isLocal: boolean;
+  element: HTMLVideoElement;
 };
 
 export interface VoiceClient {
@@ -19,6 +35,9 @@ export interface VoiceClient {
   connect(url: string, token: string): Promise<void>;
   enableMicrophone(): Promise<void>;
   setMuted(muted: boolean): Promise<void>;
+  setIncomingMuted(muted: boolean): Promise<void>;
+  setScreenSharing(sharing: boolean): Promise<void>;
+  setCameraEnabled(enabled: boolean): Promise<void>;
   enableAudio(): Promise<void>;
   disconnect(): Promise<void>;
 }

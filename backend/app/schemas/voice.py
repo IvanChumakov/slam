@@ -21,8 +21,16 @@ class JoinRequest(StrictModel):
         return value
 
 
+class RoomsRequest(StrictModel):
+    join_token: str = Field(min_length=1, max_length=4096)
+
+
+class InviteRequest(RoomsRequest):
+    room_id: int = Field(gt=0, le=2**63 - 1, strict=True)
+
+
 class RoomInfo(StrictModel):
-    id: int
+    id: int = Field(gt=0, strict=True)
     name: str
 
 
@@ -38,10 +46,20 @@ class JoinResponse(StrictModel):
     participant: ParticipantInfo
 
 
-class RoomResponse(StrictModel):
-    id: int
-    name: str
-    online_count: int
+class RoomResponse(RoomInfo):
+    online_count: int = Field(ge=0, strict=True)
+
+
+class RoomsResponse(StrictModel):
+    current_room_id: int = Field(gt=0, strict=True)
+    rooms: list[RoomResponse]
+
+
+class InviteResponse(StrictModel):
+    join_token: str = Field(min_length=1)
+    join_url: str = Field(min_length=1)
+    room: RoomInfo
+    expires_in: int = Field(gt=0, strict=True)
 
 
 class HealthResponse(StrictModel):

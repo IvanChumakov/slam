@@ -1,3 +1,11 @@
+from datetime import UTC, datetime, timedelta
+from urllib.parse import urlsplit
+
+import jwt
+import pytest
+from sqlalchemy import event, func, select
+
+from app.models import TelegramTopic, VoiceRoom
 from app.services.livekit import LiveKitPresenceEvent
 
 
@@ -120,3 +128,220 @@ async def test_livekit_webhook_requires_valid_authorization(app_context: tuple) 
     )
     assert missing.status_code == 401
     assert invalid.status_code == 401
+
+
+async def create_group_rooms(app, factory):
+    async with factory() as session:
+        rooms = []
+        for thread_id in (20, 0, 10):
+            room = await app.state.voice_service.ensure_general_room(
+                session, telegram_chat_id=-100123456, title="Gaming", telegram_thread_id=thread_id
+            )
+            rooms.append(room)
+        other = await app.state.voice_service.ensure_general_room(
+            session, telegram_chat_id=-100999999, title="Other group"
+        )
+        session.add(
+            TelegramTopic(telegram_chat_id=-100123456, telegram_thread_id=99, name="No room")
+        )
+        await app.state.room_repository.participant_joined(
+            session, room_id=rooms[0].id, identity="one", display_name="One"
+        )
+        await app.state.room_repository.participant_joined(
+            session, room_id=rooms[0].id, identity="two", display_name="Two"
+        )
+        await app.state.room_repository.participant_joined(
+            session, room_id=other.id, identity="other", display_name="Other"
+        )
+        await session.commit()
+        return rooms, other
+
+
+async def test_voice_rooms_lists_only_existing_source_group_rooms_with_aggregate_counts(
+    app_context: tuple,
+) -> None:
+    app, client, factory, _ = app_context
+    rooms, other = await create_group_rooms(app, factory)
+    token = app.state.join_tokens.create_join_token(rooms[0].id, -100123456)
+    queries = []
+
+    def record_query(connection, cursor, statement, parameters, context, executemany):
+        queries.append(statement)
+
+    event.listen(app.state.engine.sync_engine, "before_cursor_execute", record_query)
+    try:
+        response = await client.post("/api/voice/rooms", json={"join_token": token})
+    finally:
+        event.remove(app.state.engine.sync_engine, "before_cursor_execute", record_query)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "current_room_id": rooms[0].id,
+        "rooms": [
+            {"id": room.id, "name": room.name, "online_count": count}
+            for room, count in ((rooms[1], 0), (rooms[2], 0), (rooms[0], 2))
+        ],
+    }
+    assert other.id not in [room["id"] for room in response.json()["rooms"]]
+    assert len(queries) <= 3
+    async with factory() as session:
+        assert await session.scalar(select(func.count(VoiceRoom.id))) == 4
+
+
+@pytest.mark.parametrize("target_index", [0, 1, 2])
+async def test_voice_invite_mints_target_token_and_can_join(
+    app_context: tuple, target_index: int
+) -> None:
+    app, client, factory, _ = app_context
+    rooms, _ = await create_group_rooms(app, factory)
+    source_token = app.state.join_tokens.create_join_token(rooms[0].id, -100123456)
+    source_claims = jwt.decode(source_token, options={"verify_signature": False})
+    source_claims["iat"] -= 60
+    source_claims["exp"] -= 60
+    source_token = jwt.encode(
+        source_claims, app.state.settings.join_token_secret.get_secret_value(), algorithm="HS256"
+    )
+    app.state.settings.frontend_public_url = "https://frontend.test/app/"
+    target = rooms[target_index]
+    response = await client.post(
+        "/api/voice/invite", json={"join_token": source_token, "room_id": target.id}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"join_token", "join_url", "room", "expires_in"}
+    assert body["room"] == {"id": target.id, "name": target.name}
+    assert body["join_token"] != source_token
+    assert body["join_url"] == f"https://frontend.test/app/join/{body['join_token']}"
+    assert urlsplit(body["join_url"]).hostname == "frontend.test"
+    assert body["expires_in"] == app.state.settings.join_token_ttl_seconds
+    minted_claims = jwt.decode(body["join_token"], options={"verify_signature": False})
+    assert minted_claims["exp"] > source_claims["exp"]
+    assert minted_claims["exp"] - minted_claims["iat"] == body["expires_in"]
+    claims = app.state.join_tokens.verify_join_token(body["join_token"])
+    assert claims.room_id == target.id
+    assert claims.telegram_chat_id == -100123456
+    joined = await client.post(
+        "/api/voice/join", json={"join_token": body["join_token"], "display_name": "Ivan"}
+    )
+    assert joined.status_code == 200
+    assert joined.json()["room"] == body["room"]
+    listed = await client.post("/api/voice/rooms", json={"join_token": body["join_token"]})
+    assert listed.status_code == 200
+    assert listed.json()["current_room_id"] == target.id
+
+
+async def test_voice_rooms_does_not_create_missing_general(app_context: tuple) -> None:
+    app, client, factory, _ = app_context
+    async with factory() as session:
+        source = await app.state.voice_service.ensure_general_room(
+            session, telegram_chat_id=-100123456, title="Gaming", telegram_thread_id=10
+        )
+        await session.commit()
+        token = app.state.join_tokens.create_join_token(source.id, -100123456)
+    for _ in range(2):
+        response = await client.post("/api/voice/rooms", json={"join_token": token})
+        assert response.status_code == 200
+        assert response.json() == {
+            "current_room_id": source.id,
+            "rooms": [{"id": source.id, "name": source.name, "online_count": 0}],
+        }
+    async with factory() as session:
+        assert await session.scalar(select(func.count(VoiceRoom.id))) == 1
+
+
+async def test_voice_invite_missing_and_cross_group_targets_are_identical(
+    app_context: tuple,
+) -> None:
+    app, client, factory, _ = app_context
+    rooms, other = await create_group_rooms(app, factory)
+    token = app.state.join_tokens.create_join_token(rooms[0].id, -100123456)
+    for target_id in (other.id, 999999):
+        response = await client.post(
+            "/api/voice/invite", json={"join_token": token, "room_id": target_id}
+        )
+        assert response.status_code == 404
+        assert response.json() == {"detail": "Room not found"}
+
+
+@pytest.mark.parametrize("room_id", [2**63, 10**100])
+async def test_voice_invite_rejects_room_ids_outside_signed_bigint(
+    app_context: tuple, room_id: int
+) -> None:
+    app, client, factory, _ = app_context
+    _, token = await create_room_and_token(app, factory)
+    response = await client.post(
+        "/api/voice/invite", json={"join_token": token, "room_id": room_id}
+    )
+    assert response.status_code == 422
+    error = response.json()["detail"][0]
+    assert error["loc"] == ["body", "room_id"]
+    assert error["type"] == "less_than_equal"
+
+
+async def test_voice_invite_max_signed_bigint_missing_room_returns_404(app_context: tuple) -> None:
+    app, client, factory, _ = app_context
+    _, token = await create_room_and_token(app, factory)
+    response = await client.post(
+        "/api/voice/invite", json={"join_token": token, "room_id": 2**63 - 1}
+    )
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Room not found"}
+
+
+@pytest.mark.parametrize("endpoint", ["rooms", "invite"])
+@pytest.mark.parametrize(
+    "invalid_kind", ["invalid", "signature", "expired", "issuer", "audience", "chat", "missing"]
+)
+async def test_voice_discovery_and_invite_validate_source(
+    app_context: tuple, endpoint: str, invalid_kind: str
+) -> None:
+    app, client, factory, _ = app_context
+    rooms, _ = await create_group_rooms(app, factory)
+    token = app.state.join_tokens.create_join_token(rooms[0].id, -100123456)
+    claims = jwt.decode(token, options={"verify_signature": False})
+    secret = app.state.settings.join_token_secret.get_secret_value()
+    if invalid_kind == "invalid":
+        token = "invalid"
+    else:
+        if invalid_kind == "expired":
+            claims["exp"] = datetime.now(UTC) - timedelta(seconds=1)
+        elif invalid_kind == "issuer":
+            claims["iss"] = "other"
+        elif invalid_kind == "audience":
+            claims["aud"] = "other"
+        elif invalid_kind == "chat":
+            claims["telegram_chat_id"] = -100999999
+        elif invalid_kind == "missing":
+            claims["room_id"] = 999999
+        elif invalid_kind == "signature":
+            secret = "x" * 64
+        token = jwt.encode(claims, secret, algorithm="HS256")
+    payload = {"join_token": token}
+    if endpoint == "invite":
+        payload["room_id"] = rooms[1].id
+    response = await client.post(f"/api/voice/{endpoint}", json=payload)
+    expected = 404 if invalid_kind in {"chat", "missing"} else 401
+    assert response.status_code == expected
+    assert response.json() == {
+        "detail": "Room not found" if expected == 404 else "Invalid or expired invite"
+    }
+
+
+@pytest.mark.parametrize(
+    "endpoint,payload",
+    [
+        ("rooms", {}),
+        ("rooms", {"join_token": ""}),
+        ("rooms", {"join_token": "x" * 4097}),
+        ("rooms", {"join_token": "token", "group_id": 1}),
+        ("invite", {"join_token": "token", "room_id": 0}),
+        ("invite", {"join_token": "token", "room_id": -1}),
+        ("invite", {"join_token": "token", "room_id": True}),
+        ("invite", {"join_token": "token", "room_id": 1.0}),
+        ("invite", {"join_token": "token", "room_id": "1"}),
+        ("invite", {"join_token": "token", "room_id": 1, "group_id": 1}),
+    ],
+)
+async def test_voice_discovery_and_invite_strict_requests(app_context, endpoint, payload) -> None:
+    response = await app_context[1].post(f"/api/voice/{endpoint}", json=payload)
+    assert response.status_code == 422

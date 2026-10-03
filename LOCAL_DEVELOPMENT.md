@@ -1,7 +1,7 @@
 # Local full-stack development
 
 This setup runs the React client, FastAPI, PostgreSQL and LiveKit locally with
-Docker. It supports a real two-browser WebRTC audio test without Telegram,
+Docker. It supports a real two-browser WebRTC audio and screen-sharing test without Telegram,
 public domains, TLS, Node.js or the LiveKit CLI.
 
 ## Requirements
@@ -43,7 +43,23 @@ http://localhost:5173/join/
 3. Select **Join Voice** and allow microphone access.
 4. Confirm both names appear in both windows.
 5. Use headphones to avoid feedback, then confirm audio works both ways.
-6. Test mute/unmute and **Leave**.
+6. Mute only the microphone: the other browser should stop hearing you, but you
+   should still hear it. Unmute the microphone, then mute only incoming sound:
+   the other browser should still hear you, but you should hear no room audio.
+7. While incoming sound is muted, have the other browser start a new audio track
+   (for example, rejoin); it must remain inaudible until you unmute sound.
+8. Share a screen, window, or browser tab and confirm the other browser sees
+   changing content. Stop both through the app and the browser's capture control;
+   the video must disappear without ending the call. Canceling the capture chooser
+   must also leave the call connected.
+9. Confirm microphone mute and incoming-sound mute do not stop screen video, then
+   test **Leave** and verify microphone and screen capture are released.
+
+Screen capture requires a supported browser and a secure context (`localhost`
+qualifies). Sharing system/tab audio depends on the browser and selected source;
+video-only sharing is valid when capture audio is unavailable. This localhost
+test does not prove VPN or TURN connectivity. For the optional server TURN/TLS
+configuration and a real relay-path check, see `SERVER_DEPLOYMENT.md`.
 
 The invite is valid for 24 hours in the local environment. Run the `invite`
 command again at any time to get a fresh one.

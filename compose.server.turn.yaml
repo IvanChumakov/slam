@@ -1,0 +1,61 @@
+# Opt-in only: combine with compose.server.yaml after provisioning TLS and a secret.
+services:
+  livekit:
+    entrypoint: [/bin/sh, /etc/slam/turn-start.sh]
+    command: [livekit]
+    environment:
+      LIVEKIT_TURN_ENABLED: "false"
+      TURN_DOMAIN: "${TURN_DOMAIN:?Set TURN_DOMAIN to the trusted certificate hostname}"
+    volumes:
+      - ./infra/scripts/turn-start.sh:/etc/slam/turn-start.sh:ro
+      - type: bind
+        source: "${TURN_SECRET_FILE:?Set TURN_SECRET_FILE to an absolute mode-0600 shared-secret path}"
+        target: /run/secrets/turn_shared_secret
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs: ["/tmp:size=16m,mode=0700"]
+    depends_on:
+      coturn: {condition: service_started}
+
+  coturn:
+    image: coturn/coturn:4.18.0-r0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e
+    # Bypass upstream auto-discovery/eval; inputs are validated by our wrapper.
+    entrypoint: [/bin/sh, /etc/slam/turn-start.sh]
+    command: [coturn]
+    network_mode: host
+    user: "0:0"
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    # The image's turnserver binary has this file capability.
+    cap_add: [NET_BIND_SERVICE]
+    environment:
+      TURN_DOMAIN: "${TURN_DOMAIN:?Set TURN_DOMAIN to the trusted certificate hostname}"
+      TURN_PUBLIC_IP: "${TURN_PUBLIC_IP:?Set TURN_PUBLIC_IP to the server public IPv4}"
+    volumes:
+      - ./infra/scripts/turn-start.sh:/etc/slam/turn-start.sh:ro
+      - ./infra/coturn.conf:/etc/coturn/base.conf:ro
+      - type: bind
+        source: "${TURN_SECRET_FILE:?Set TURN_SECRET_FILE to an absolute mode-0600 shared-secret path}"
+        target: /run/secrets/turn_shared_secret
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${TURN_CERT_FILE:?Set TURN_CERT_FILE to an absolute full-chain PEM path}"
+        target: /etc/coturn/tls/fullchain.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${TURN_KEY_FILE:?Set TURN_KEY_FILE to an absolute private-key PEM path}"
+        target: /etc/coturn/tls/privkey.pem
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:size=16m,mode=0700
+      - /var/lib/coturn:size=16m,mode=0700
+    restart: unless-stopped
+    stop_grace_period: 30s

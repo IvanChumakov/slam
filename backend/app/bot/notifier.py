@@ -4,6 +4,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.bot.pinning import pin_room_card
 from app.bot.presentation import join_keyboard, room_message
 from app.db.repositories import RoomRepository
 from app.models import VoiceRoom
@@ -55,6 +56,14 @@ class TelegramRoomNotifier:
                 )
                 await self._repository.set_telegram_message_id(session, room, sent.message_id)
                 await session.commit()
+            else:
+                return
+            await pin_room_card(
+                self._bot,
+                chat_id=room.group.telegram_chat_id,
+                message_id=sent.message_id,
+                thread_id=room.telegram_thread_id or None,
+            )
 
 
 class NullRoomNotifier:

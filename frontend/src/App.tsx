@@ -3,6 +3,7 @@ import { createAppDependencies } from './appDependencies';
 import type { AppDependencies } from './appDependencies';
 import { JoinScreen } from './components/JoinScreen';
 import { VoiceRoom } from './components/VoiceRoom';
+import { Appearance } from './components/Appearance';
 import { useVoiceRoom } from './voice/useVoiceRoom';
 import type { VoiceRoomState } from './voice/useVoiceRoom';
 
@@ -49,10 +50,18 @@ function LeftScreen({ onJoinAgain }: { onJoinAgain: () => void }) {
 
 function VoiceJoinPage({ dependencies }: { dependencies: AppDependencies }) {
   const { token = '' } = useParams();
-  const { state, join, leave, setMuted, enableAudio, reset } = useVoiceRoom({
+  const { state, join, leave, switchRoom, refreshRooms, fetchInvite, retry, setMuted, setIncomingMuted, setScreenSharing, setCameraEnabled, enableAudio, reset } = useVoiceRoom({
     token,
     api: dependencies.api,
     createClient: dependencies.createClient,
+    onTokenChange: (nextToken) => {
+      try {
+        // Preserve React Router's history metadata; do not reload/remount the call.
+        window.history.replaceState(window.history.state, '', `/join/${encodeURIComponent(nextToken)}`);
+      } catch {
+        // Restricted history must not interrupt a room connection.
+      }
+    },
   });
   const busy =
     state.phase === 'requestingCredentials' ||
@@ -63,35 +72,44 @@ function VoiceJoinPage({ dependencies }: { dependencies: AppDependencies }) {
     return <LeftScreen onJoinAgain={reset} />;
   }
 
-  if (state.phase === 'connected' || state.phase === 'reconnecting') {
+  if (state.phase === 'error' && state.roomId !== null) {
+    return (
+      <section className="voice-card message-card">
+        <p className="eyebrow">CONNECTION FAILED</p>
+        <h1>{state.roomName}</h1>
+        <p className="form-error room-error" role="alert">{state.error}</p>
+        <button className="button button-primary" onClick={() => void retry()}>Retry connection</button>
+        <button className="button button-danger" onClick={() => void leave()}>Leave</button>
+      </section>
+    );
+  }
+
+  if (state.phase === 'connected' || state.phase === 'reconnecting' || state.switching) {
     return (
       <VoiceRoom
-        state={{
-          roomName: state.roomName,
-          phase: state.phase,
-          participants: state.participants,
-          localMuted: state.localMuted,
-          needsAudioPermission: state.needsAudioPermission,
-        }}
-        actions={{ setMuted, enableAudio, leave }}
+        state={state}
+        actions={{ setMuted, setIncomingMuted, setScreenSharing, setCameraEnabled, enableAudio, leave, switchRoom, refreshRooms, fetchInvite }}
       />
     );
   }
 
   return (
-    <JoinScreen
-      busy={busy}
-      error={state.error}
-      progressMessage={progressMessage(state)}
-      onJoin={(name) => void join(name)}
-    />
+    <>
+      <JoinScreen
+        busy={busy}
+        error={state.error}
+        progressMessage={progressMessage(state)}
+        onJoin={(name) => void join(name)}
+      />
+      {busy ? <button className="button button-danger" onClick={() => void leave()}>Leave</button> : null}
+    </>
   );
 }
 
 export function App({ dependencies = defaultDependencies }: { dependencies?: AppDependencies }) {
   return (
     <main className="app-shell">
-      <div className="ambient-grid" aria-hidden="true" />
+      <div className="app-topbar"><span className="brand">Slam <span>voice</span></span><Appearance /></div>
       <Routes>
         <Route path="/join/:token" element={<VoiceJoinPage dependencies={dependencies} />} />
         <Route path="*" element={<InviteError />} />

@@ -9,6 +9,9 @@ class FakeVoiceClient implements VoiceClient {
   async connect() {}
   async enableMicrophone() {}
   async setMuted() {}
+  async setIncomingMuted() {}
+  async setScreenSharing() {}
+  async setCameraEnabled() {}
   async enableAudio() {}
   async disconnect() {}
 }

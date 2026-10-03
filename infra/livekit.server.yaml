@@ -11,9 +11,13 @@ room:
   departure_timeout: 20
   enabled_codecs:
     - mime: audio/opus
+    - mime: video/vp8
+    - mime: video/h264
 logging:
   level: info
   pion_level: warn
 webhook:
   api_key: serverkey
   urls: [http://api:8000/api/livekit/webhook]
+turn:
+  enabled: false

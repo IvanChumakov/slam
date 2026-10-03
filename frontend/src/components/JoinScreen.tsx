@@ -34,11 +34,6 @@ export function JoinScreen({
   return (
     <section className="voice-card join-card" aria-labelledby="join-title">
       <header className="card-heading">
-        <span className="voice-rail" aria-hidden="true">
-          <i />
-          <i />
-          <i />
-        </span>
         <div>
           <p className="eyebrow">SLAM VOICE</p>
           <h1 id="join-title">Join the conversation</h1>

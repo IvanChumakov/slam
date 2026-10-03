@@ -5,6 +5,7 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.notifier import TelegramRoomNotifier
+from app.bot.pinning import pin_room_card
 from app.bot.presentation import join_keyboard, room_message
 from app.db.repositories import RoomRepository
 from app.services.tokens import JoinTokenService
@@ -99,6 +100,12 @@ async def voice_handler(
         )
         await room_repository.set_telegram_message_id(session, room, sent.message_id)
         await session.commit()
+        await pin_room_card(
+            bot,
+            chat_id=message.chat.id,
+            message_id=sent.message_id,
+            thread_id=message.message_thread_id,
+        )
 
 
 async def voice_button_handler(
