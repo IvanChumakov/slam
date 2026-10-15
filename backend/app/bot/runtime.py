@@ -2,6 +2,7 @@ from aiogram import Bot, Dispatcher
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.handlers import create_router
+from app.bot.session import TelegramSession
 from app.config import Settings
 from app.db.repositories import RoomRepository
 from app.services.tokens import JoinTokenService
@@ -16,7 +17,7 @@ def create_dispatcher(
     join_tokens: JoinTokenService,
     voice_service: VoiceService,
 ) -> tuple[Bot, Dispatcher]:
-    bot = Bot(token=settings.bot_token.get_secret_value())
+    bot = Bot(token=settings.bot_token.get_secret_value(), session=TelegramSession())
     dispatcher = Dispatcher(
         session_factory=session_factory,
         room_repository=room_repository,

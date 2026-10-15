@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from 'react';
 
-type Preferences = { version: 1; mode: 'system' | 'light' | 'dark'; accent: 'clay' | 'sage' | 'slate' };
+type Preferences = { version: 1; mode: 'system' | 'light' | 'dark' | 'black'; accent: 'clay' | 'sage' | 'slate' };
 const storageKey = 'slam.appearance.v1';
 
 export function Appearance() {
@@ -8,7 +8,7 @@ export function Appearance() {
   const [preferences, setPreferences] = useState<Preferences>(() => {
     try {
       const value = JSON.parse(localStorage.getItem(storageKey) || 'null');
-      if (value?.version === 1 && ['system', 'light', 'dark'].includes(value.mode) &&
+      if (value?.version === 1 && ['system', 'light', 'dark', 'black'].includes(value.mode) &&
         ['clay', 'sage', 'slate'].includes(value.accent)) {
         return { version: 1, mode: value.mode, accent: value.accent };
       }
@@ -39,6 +39,7 @@ export function Appearance() {
         <select id={`${id}-mode`} value={preferences.mode}
           onChange={(event) => setPreferences({ ...preferences, mode: event.target.value as Preferences['mode'] })}>
           <option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option>
+          <option value="black">Black</option>
         </select>
         <label htmlFor={`${id}-accent`}>Accent color</label>
         <select id={`${id}-accent`} value={preferences.accent}

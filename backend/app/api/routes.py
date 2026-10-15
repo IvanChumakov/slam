@@ -7,6 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.dependencies import SessionDependency
 from app.schemas.voice import (
+    ChannelResponse,
     HealthResponse,
     InviteRequest,
     InviteResponse,
@@ -17,7 +18,11 @@ from app.schemas.voice import (
     RoomResponse,
     RoomsRequest,
     RoomsResponse,
+    TelegramProfileRequest,
+    TelegramProfileResponse,
 )
+from app.services.presence import PresenceUnavailable
+from app.services.telegram import InvalidTelegramProfile
 from app.services.tokens import InvalidJoinToken
 from app.services.voice import RoomNotFound
 
@@ -54,6 +59,24 @@ async def readiness(session: SessionDependency) -> HealthResponse:
 
 
 @router.post(
+    "/api/telegram/profile",
+    response_model=TelegramProfileResponse,
+    responses={401: {"description": "Invalid Telegram profile"}},
+    tags=["integrations"],
+)
+async def telegram_profile(
+    payload: TelegramProfileRequest, request: Request
+) -> TelegramProfileResponse:
+    try:
+        profile = request.app.state.telegram_profiles.verify(payload.init_data)
+    except InvalidTelegramProfile:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Telegram profile"
+        ) from None
+    return TelegramProfileResponse(username=profile.username, avatar_url=profile.avatar_url)
+
+
+@router.post(
     "/api/voice/join",
     response_model=JoinResponse,
     responses={
@@ -70,7 +93,12 @@ async def join_voice(
             session,
             join_token=payload.join_token,
             display_name=payload.display_name,
+            telegram_init_data=payload.telegram_init_data,
         )
+    except InvalidTelegramProfile:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Telegram profile"
+        ) from None
     except InvalidJoinToken as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired invite"
@@ -107,10 +135,26 @@ async def voice_rooms(
         ) from exc
     except RoomNotFound as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Room not found") from exc
+    except PresenceUnavailable:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Participant counts are temporarily unavailable",
+        ) from None
     return RoomsResponse(
         current_room_id=current_room_id,
         rooms=[
-            RoomResponse(id=room.id, name=room.name, online_count=count) for room, count in rooms
+            ChannelResponse(
+                id=roster.room.id,
+                name=roster.room.name,
+                online_count=len(roster.participants),
+                participants=[
+                    ParticipantInfo(
+                        identity=participant.identity, display_name=participant.display_name
+                    )
+                    for participant in roster.participants
+                ],
+            )
+            for roster in rooms
         ],
     )
 
@@ -156,7 +200,15 @@ async def room(room_id: int, request: Request, session: SessionDependency) -> Ro
     voice_room = await request.app.state.room_repository.get_room(session, room_id)
     if voice_room is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Room not found")
-    online_count = await request.app.state.room_repository.online_count(session, room_id)
+    try:
+        online_count = (
+            await request.app.state.voice_service.presence(session, voice_room)
+        ).online_count
+    except PresenceUnavailable:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Participant counts are temporarily unavailable",
+        ) from None
     return RoomResponse(id=voice_room.id, name=voice_room.name, online_count=online_count)
 
 
@@ -198,17 +250,5 @@ async def livekit_webhook(
     )
     if voice_room is None:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
-    if event.event == "participant_joined":
-        await request.app.state.room_repository.participant_joined(
-            session,
-            room_id=voice_room.id,
-            identity=event.identity,
-            display_name=event.display_name,
-        )
-    elif event.event == "participant_left":
-        await request.app.state.room_repository.participant_left(
-            session, room_id=voice_room.id, identity=event.identity
-        )
-    await session.commit()
-    await request.app.state.room_notifier.update(voice_room.id)
+    request.app.state.presence_sync.request_refresh(voice_room.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

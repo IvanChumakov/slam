@@ -1,7 +1,7 @@
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiogram import Bot
@@ -15,8 +15,8 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
     TelegramServerError,
 )
-from aiogram.methods import EditMessageText, PinChatMessage, SendMessage
-from aiogram.types import Chat, Message
+from aiogram.methods import EditMessageText, PinChatMessage, SendMessage, UnpinChatMessage
+from aiogram.types import Chat, Message, User
 from sqlalchemy import func, select
 
 from app.bot.handlers import voice_handler
@@ -24,6 +24,72 @@ from app.bot.notifier import TelegramRoomNotifier
 from app.bot.pinning import pin_room_card
 from app.models import TelegramGroup, VoiceRoom
 from app.services.livekit import LiveKitPresenceEvent
+
+
+@pytest.fixture(autouse=True)
+def known_guest_bot_profile(monkeypatch):
+    # Dispatcher startup already resolves the bot profile before handling commands.
+    monkeypatch.setattr(
+        Bot,
+        "me",
+        AsyncMock(
+            return_value=User(
+                id=123456,
+                is_bot=True,
+                first_name="Test",
+                username="test_bot",
+                has_main_web_app=False,
+            )
+        ),
+    )
+
+
+async def test_voice_uses_authoritative_presence_and_syncs_after_store_commit(monkeypatch):
+    from app.bot import handlers
+
+    room = SimpleNamespace(id=7, name="Topic", group=SimpleNamespace(telegram_chat_id=-100123456))
+    session = AsyncMock()
+    factory = MagicMock()
+    factory.return_value.__aenter__.return_value = session
+    factory.return_value.__aexit__.return_value = False
+    repository = SimpleNamespace(
+        get_room_with_group=AsyncMock(return_value=room),
+        set_telegram_message_id=AsyncMock(),
+        presence=AsyncMock(side_effect=AssertionError("database presence is not authoritative")),
+    )
+    voice_service = SimpleNamespace(
+        ensure_general_room=AsyncMock(return_value=room),
+        presence=AsyncMock(
+            return_value=SimpleNamespace(online_count=1, participant_names=("Live",))
+        ),
+    )
+
+    async def sync(bot, session_factory, repo, room_id, **kwargs):
+        assert session.commit.await_count == 2
+        factory.return_value.__aexit__.assert_awaited_once()
+        assert session_factory is factory and repo is repository and room_id == 7
+
+    sync_mock = AsyncMock(side_effect=sync)
+    monkeypatch.setattr(handlers, "sync_room_card_pins", sync_mock, raising=False)
+    bot = SimpleNamespace(
+        me=AsyncMock(return_value=SimpleNamespace(has_main_web_app=False, username="test_bot")),
+        send_message=AsyncMock(return_value=SimpleNamespace(message_id=888)),
+        pin_chat_message=AsyncMock(),
+        unpin_chat_message=AsyncMock(),
+    )
+    await voice_handler(
+        SimpleNamespace(chat=SimpleNamespace(id=-100123456, title="Forum"), message_thread_id=42),
+        bot,
+        factory,
+        voice_service,
+        repository,
+        SimpleNamespace(create_join_token=lambda *args: "join-token"),
+        "http://frontend.test",
+    )
+    voice_service.presence.assert_awaited_once_with(session, room)
+    assert "Live" in bot.send_message.await_args.kwargs["text"]
+    sync_mock.assert_awaited_once()
+    bot.pin_chat_message.assert_not_awaited()
 
 
 async def test_repeated_voice_reuses_room_and_replies_each_time(app_context: tuple) -> None:
@@ -35,6 +101,7 @@ async def test_repeated_voice_reuses_room_and_replies_each_time(app_context: tup
         answer=AsyncMock(return_value=sent),
     )
     bot = SimpleNamespace(
+        me=AsyncMock(return_value=SimpleNamespace(has_main_web_app=False, username="test_bot")),
         edit_message_text=AsyncMock(),
         send_message=AsyncMock(return_value=sent),
         pin_chat_message=AsyncMock(),
@@ -79,6 +146,7 @@ async def test_voice_in_different_topics_gets_different_rooms(app_context: tuple
             answer=AsyncMock(return_value=SimpleNamespace(message_id=100 + (thread_id or 0))),
         )
         bot = SimpleNamespace(
+            me=AsyncMock(return_value=SimpleNamespace(has_main_web_app=False, username="test_bot")),
             send_message=AsyncMock(return_value=SimpleNamespace(message_id=100 + (thread_id or 0))),
             pin_chat_message=AsyncMock(),
         )
@@ -110,8 +178,16 @@ async def test_voice_with_real_aiogram_objects(app_context: tuple) -> None:
         is_topic_message=True,
         text="/voice",
     )
-    sent = message.model_copy(update={"message_id": 777})
-    transport = AsyncMock(return_value=sent)
+    next_id = 776
+
+    async def respond(bot, request, **kwargs):
+        nonlocal next_id
+        if isinstance(request, SendMessage):
+            next_id += 1
+            return message.model_copy(update={"message_id": next_id})
+        return True
+
+    transport = AsyncMock(side_effect=respond)
     bot = Bot(token="123456:TEST_TOKEN", session=transport)
     for _ in range(2):
         await voice_handler(
@@ -123,14 +199,18 @@ async def test_voice_with_real_aiogram_objects(app_context: tuple) -> None:
             join_tokens=app.state.join_tokens,
             frontend_public_url="http://frontend.test",
         )
-    assert transport.await_count == 4
+    assert transport.await_count == 5
     room_ids = []
     for call in transport.await_args_list:
         request = call.args[1]
         if isinstance(request, PinChatMessage):
             assert request.chat_id == message.chat.id
-            assert request.message_id == 777
+            assert request.message_id in (777, 778)
             assert request.disable_notification is True
+            continue
+        if isinstance(request, UnpinChatMessage):
+            assert request.chat_id == message.chat.id
+            assert request.message_id == 777
             continue
         assert request.chat_id == message.chat.id
         assert request.message_thread_id == 42
@@ -149,6 +229,7 @@ async def test_notifier_replacement_stays_in_room_topic(app_context: tuple) -> N
         await session.commit()
         room_id = room.id
     bot = SimpleNamespace(
+        me=AsyncMock(return_value=SimpleNamespace(has_main_web_app=False, username="test_bot")),
         edit_message_text=AsyncMock(
             side_effect=TelegramBadRequest(
                 method=EditMessageText(text="test"), message="message to edit not found"
@@ -156,6 +237,7 @@ async def test_notifier_replacement_stays_in_room_topic(app_context: tuple) -> N
         ),
         send_message=AsyncMock(return_value=SimpleNamespace(message_id=888)),
         pin_chat_message=AsyncMock(),
+        unpin_chat_message=AsyncMock(),
     )
     notifier = TelegramRoomNotifier(
         bot, factory, app.state.room_repository, app.state.join_tokens, "http://frontend.test"
@@ -202,6 +284,11 @@ async def test_new_cards_pin_after_commit_without_card_loss(
     async def respond(bot, request, **kwargs):
         if isinstance(request, EditMessageText):
             raise TelegramBadRequest(method=request, message="message to edit not found")
+        if isinstance(request, UnpinChatMessage):
+            assert replacement and failure is None
+            assert request.chat_id == message.chat.id
+            assert request.message_id == 555
+            return True
         if isinstance(request, PinChatMessage):
             async with factory() as session:
                 saved = await session.get(VoiceRoom, room_id)
@@ -257,6 +344,8 @@ async def test_new_cards_pin_after_commit_without_card_loss(
             headers={"Authorization": "Bearer valid"},
         )
         assert response.status_code == 204
+        await app.state.presence_sync.refresh(room_id)
+        await app.state.room_notifier.update(room_id)
     else:
         await voice_handler(
             message,
@@ -518,6 +607,8 @@ async def test_sdk_error_responses_preserve_committed_card(
             headers={"Authorization": "Bearer valid"},
         )
         assert response.status_code == 204
+        await app.state.presence_sync.refresh(room_id)
+        await app.state.room_notifier.update(room_id)
     else:
         await voice_handler(
             message,

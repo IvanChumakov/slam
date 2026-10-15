@@ -11,11 +11,21 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
     TelegramServerError,
 )
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.db.repositories import RoomRepository
 
 logger = logging.getLogger(__name__)
 
 
-async def pin_room_card(bot: Bot, *, chat_id: int, message_id: int, thread_id: int | None) -> None:
+async def pin_room_card(
+    bot: Bot,
+    *,
+    chat_id: int,
+    message_id: int,
+    thread_id: int | None,
+    notify_failure: bool = True,
+) -> bool:
     try:
         await bot.pin_chat_message(
             chat_id=chat_id, message_id=message_id, disable_notification=True
@@ -59,6 +69,10 @@ async def pin_room_card(bot: Bot, *, chat_id: int, message_id: int, thread_id: i
                     reason = category
                     break
         logger.warning("Room card pin failed: error_class=%s reason=%s", error_class, reason)
+        if not notify_failure:
+            if isinstance(exc, TelegramRetryAfter):
+                raise
+            return False
         action = {
             "admin_required": (
                 "Make the bot an administrator in this chat with the Pin messages permission "
@@ -82,3 +96,68 @@ async def pin_room_card(bot: Bot, *, chat_id: int, message_id: int, thread_id: i
             await bot.send_message(chat_id=chat_id, message_thread_id=thread_id, text=warning)
         except (TelegramAPIError, ClientDecodeError):
             logger.warning("Room card pin warning could not be delivered")
+        return False
+    return True
+
+
+async def sync_room_card_pins(
+    bot: Bot,
+    session_factory: async_sessionmaker[AsyncSession],
+    repository: RoomRepository,
+    room_id: int,
+    notify_failure: bool = True,
+) -> None:
+    async with session_factory() as session:
+        # Keep the latest desired ID stable through Telegram operations and the cleanup commit.
+        room = await repository.get_room_with_group_for_update(session, room_id)
+        if room is None or room.telegram_message_id is None:
+            return
+        message_id = room.telegram_message_id
+        chat_id = room.group.telegram_chat_id
+        if room.telegram_pin_pending:
+            pinned = await pin_room_card(
+                bot,
+                chat_id=chat_id,
+                message_id=message_id,
+                thread_id=room.telegram_thread_id or None,
+                notify_failure=notify_failure,
+            )
+            if not pinned:
+                return
+            room.telegram_pin_pending = False
+
+        remaining = []
+        old_ids = [
+            old_id
+            for old_id in dict.fromkeys(room.telegram_pending_unpin_ids)
+            if old_id != message_id
+        ]
+        for index, old_id in enumerate(old_ids):
+            try:
+                await bot.unpin_chat_message(chat_id=chat_id, message_id=old_id)
+            except (TelegramAPIError, ClientDecodeError) as exc:
+                if isinstance(exc, TelegramRetryAfter):
+                    remaining.extend(old_ids[index:])
+                    room.telegram_pending_unpin_ids = remaining
+                    await session.commit()
+                    if not notify_failure:
+                        raise
+                    break
+                detail = (
+                    exc.message.strip().lower()
+                    if isinstance(exc, TelegramBadRequest) and isinstance(exc.message, str)
+                    else ""
+                )
+                detail = detail.removeprefix("bad request: ")
+                if detail in (
+                    "message to unpin not found",
+                    "message is not pinned",
+                    "message not pinned",
+                ):
+                    continue
+                remaining.append(old_id)
+                # Do not log exception strings, response bodies, or user/chat identifiers.
+                reason = "invalid_response" if isinstance(exc, ClientDecodeError) else "api_error"
+                logger.warning("Room card unpin failed: reason=%s", reason)
+        room.telegram_pending_unpin_ids = remaining
+        await session.commit()

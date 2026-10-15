@@ -1,5 +1,10 @@
 import {
   Room,
+  ConnectionError,
+  ConnectionErrorReason,
+  DisconnectReason,
+  LivekitError,
+  NegotiationError,
   RoomEvent,
   Track,
   TrackEvent,
@@ -17,18 +22,56 @@ import type {
   VoiceSnapshot,
   VoiceScreen,
 } from './types';
+import { VoiceClientError, type VoiceFailureCode, type VoiceFailureStage, type VoiceDisconnectReason } from './types';
+import { AudioActivityObserver } from './audioActivity';
+import { safeAvatarUrl } from '../telegram';
 
 type RoomFactory = (options: RoomOptions) => Room;
 
-function toParticipant(participant: Participant, isLocal: boolean): VoiceParticipant {
+function safeClientError(error: unknown, stage: VoiceFailureStage, disconnectReason?: VoiceDisconnectReason): VoiceClientError {
+  if (stage === 'unknown') {
+    // SignalConnected can belong to an earlier region attempt inside Room.connect.
+    // Timeout/InternalError/Cancelled are shared by signaling and RTC paths.
+    if (error instanceof ConnectionError && [
+      ConnectionErrorReason.NotAllowed,
+      ConnectionErrorReason.ServerUnreachable,
+      ConnectionErrorReason.WebSocket,
+      ConnectionErrorReason.ServiceNotFound,
+    ].includes(error.reason)) {
+      stage = 'signaling';
+    } else if (error instanceof NegotiationError) {
+      stage = 'rtc';
+    }
+  }
+  let code: VoiceFailureCode = 'unknown';
+  if (stage === 'microphone' && (error instanceof Error || error instanceof DOMException) && error.name === 'NotAllowedError') {
+    code = 'permission-denied';
+  } else if (error instanceof ConnectionError && typeof error.reason === 'number' &&
+    typeof ConnectionErrorReason[error.reason] === 'string') {
+    code = `connection-${ConnectionErrorReason[error.reason].toLowerCase()}` as VoiceFailureCode;
+  } else if (error instanceof LivekitError && [10, 12, 13, 14, 15, 16, 18, 20, 21].includes(error.code)) {
+    code = `sdk-${error.code}`;
+  }
+  return new VoiceClientError(stage, code, disconnectReason);
+}
+
+function toParticipant(participant: Participant, isLocal: boolean, speaking: boolean): VoiceParticipant {
   const microphone = participant.getTrackPublication(Track.Source.Microphone);
+  let avatarUrl: string | undefined;
+  try {
+    const metadata: unknown = JSON.parse(participant.metadata || '{}');
+    if (typeof metadata === 'object' && metadata !== null && !Array.isArray(metadata)) {
+      avatarUrl = safeAvatarUrl((metadata as Record<string, unknown>).avatar_url);
+    }
+  } catch { /* Missing or malformed metadata keeps initials. */ }
 
   return {
     identity: participant.identity,
     displayName: participant.name || participant.identity,
+    ...(avatarUrl ? { avatarUrl } : {}),
     isLocal,
     isMuted: !microphone || microphone.isMuted,
-    isSpeaking: participant.isSpeaking,
+    isSpeaking: !microphone?.isMuted && !!microphone && speaking,
   };
 }
 
@@ -45,9 +88,14 @@ export class LiveKitVoiceClient implements VoiceClient {
   private incomingMuted = false;
   private screenSharePending = false;
   private connection: VoiceConnection = 'disconnected';
+  private disconnectReason: VoiceDisconnectReason | undefined;
   private audioRoot: HTMLDivElement | null = null;
   private eventsRegistered = false;
   private disposed = false;
+  private readonly monitoredAudio = new Map<Track, MediaStreamTrack>();
+  private readonly audioActivity = new AudioActivityObserver(() => {
+    if (!this.disposed) this.emitSnapshot();
+  });
 
   constructor(createRoom: RoomFactory = (options) => new Room(options)) {
     this.room = createRoom({
@@ -68,7 +116,12 @@ export class LiveKitVoiceClient implements VoiceClient {
   async connect(url: string, token: string) {
     if (this.disposed) return;
     this.registerEvents();
-    await this.room.connect(url, token);
+    this.disconnectReason = undefined;
+    try {
+      await this.room.connect(url, token);
+    } catch (error) {
+      throw safeClientError(error, 'unknown', this.disconnectReason);
+    }
     if (this.disposed) {
       await this.room.disconnect(true);
       return;
@@ -80,7 +133,11 @@ export class LiveKitVoiceClient implements VoiceClient {
 
   async enableMicrophone() {
     if (this.disposed) return;
-    await this.room.localParticipant.setMicrophoneEnabled(true);
+    try {
+      await this.room.localParticipant.setMicrophoneEnabled(true);
+    } catch (error) {
+      throw safeClientError(error, 'microphone');
+    }
     if (this.disposed) {
       await this.stopLateMicrophone();
       return;
@@ -251,6 +308,7 @@ export class LiveKitVoiceClient implements VoiceClient {
   }
 
   async enableAudio() {
+    for (const stream of this.monitoredAudio.values()) this.audioActivity.watch(stream);
     try {
       await this.room.startAudio();
     } finally {
@@ -261,6 +319,8 @@ export class LiveKitVoiceClient implements VoiceClient {
 
   async disconnect() {
     this.disposed = true;
+    this.resetAudioActivity();
+    this.audioActivity.dispose();
     this.cameraIntent = false;
     ++this.cameraOperation;
     this.cameraTrack?.stop();
@@ -328,6 +388,7 @@ export class LiveKitVoiceClient implements VoiceClient {
 
   private readonly handleReconnecting = () => {
     this.connection = 'reconnecting';
+    this.resetAudioActivity();
     this.emitSnapshot();
   };
 
@@ -336,8 +397,12 @@ export class LiveKitVoiceClient implements VoiceClient {
     this.emitSnapshot();
   };
 
-  private readonly handleDisconnected = () => {
+  private readonly handleDisconnected = (reason?: DisconnectReason) => {
+    this.disconnectReason = typeof reason === 'number' && reason !== DisconnectReason.UNKNOWN_REASON &&
+      typeof DisconnectReason[reason] === 'string'
+      ? DisconnectReason[reason].toLowerCase() as VoiceDisconnectReason : 'unknown';
     this.connection = 'disconnected';
+    this.resetAudioActivity();
     this.cameraIntent = false;
     ++this.cameraOperation;
     this.cameraTrack?.stop();
@@ -359,6 +424,7 @@ export class LiveKitVoiceClient implements VoiceClient {
     this.room.on(RoomEvent.ParticipantConnected, this.handleParticipantChange);
     this.room.on(RoomEvent.ParticipantDisconnected, this.handleParticipantChange);
     this.room.on(RoomEvent.ParticipantNameChanged, this.handleParticipantChange);
+    this.room.on(RoomEvent.ParticipantMetadataChanged, this.handleParticipantChange);
     this.room.on(RoomEvent.ActiveSpeakersChanged, this.handleParticipantChange);
     this.room.on(RoomEvent.TrackSubscribed, this.handleTrackSubscribed);
     this.room.on(RoomEvent.TrackUnsubscribed, this.handleTrackUnsubscribed);
@@ -384,6 +450,7 @@ export class LiveKitVoiceClient implements VoiceClient {
     this.room.off(RoomEvent.ParticipantConnected, this.handleParticipantChange);
     this.room.off(RoomEvent.ParticipantDisconnected, this.handleParticipantChange);
     this.room.off(RoomEvent.ParticipantNameChanged, this.handleParticipantChange);
+    this.room.off(RoomEvent.ParticipantMetadataChanged, this.handleParticipantChange);
     this.room.off(RoomEvent.ActiveSpeakersChanged, this.handleParticipantChange);
     this.room.off(RoomEvent.TrackSubscribed, this.handleTrackSubscribed);
     this.room.off(RoomEvent.TrackUnsubscribed, this.handleTrackUnsubscribed);
@@ -401,17 +468,18 @@ export class LiveKitVoiceClient implements VoiceClient {
   }
 
   private snapshot(): VoiceSnapshot {
-    const localParticipant = toParticipant(this.room.localParticipant, true);
+    const localParticipant = this.participantSnapshot(this.room.localParticipant, true);
     const remoteParticipants = [...this.room.remoteParticipants.values()]
-      .map((participant) => toParticipant(participant, false))
+      .map((participant) => this.participantSnapshot(participant, false))
       .sort((left, right) => left.displayName.localeCompare(right.displayName));
     const participants = [localParticipant, ...remoteParticipants];
-    if (this.connection === 'disconnected') {
+    if (this.connection !== 'connected') {
       for (const participant of participants) participant.isSpeaking = false;
     }
 
     return {
       connection: this.connection,
+      ...(this.disconnectReason ? { disconnectReason: this.disconnectReason } : {}),
       participants,
       localMuted: localParticipant.isMuted,
       needsAudioPermission: !this.room.canPlaybackAudio,
@@ -426,10 +494,53 @@ export class LiveKitVoiceClient implements VoiceClient {
   }
 
   private emitSnapshot() {
+    this.syncAudioActivity();
     const snapshot = this.snapshot();
     for (const listener of this.listeners) {
       listener(snapshot);
     }
+  }
+
+  private participantSnapshot(participant: Participant, isLocal: boolean): VoiceParticipant {
+    const stream = participant.getTrackPublication(Track.Source.Microphone)?.track?.mediaStreamTrack;
+    const observed = stream && (isLocal || !this.incomingMuted)
+      ? this.audioActivity.speaking(stream) : undefined;
+    return toParticipant(participant, isLocal,
+      stream?.readyState === 'ended' ? false : observed ?? participant.isSpeaking);
+  }
+
+  private readonly handleAudioTrackRestarted = () => this.emitSnapshot();
+
+  private syncAudioActivity() {
+    if (this.disposed || this.connection !== 'connected') return;
+    const current = new Map<Track, MediaStreamTrack>();
+    const participants = [this.room.localParticipant, ...this.room.remoteParticipants.values()];
+    for (const participant of participants) {
+      const publication = participant.getTrackPublication(Track.Source.Microphone);
+      const track = publication?.track;
+      const isLocal = participant === this.room.localParticipant;
+      if (!track || publication?.isMuted || track.mediaStreamTrack.readyState !== 'live' ||
+        (!isLocal && (this.incomingMuted || !this.attachedTracks.has(track)))) continue;
+      current.set(track, track.mediaStreamTrack);
+    }
+    for (const [track, stream] of [...this.monitoredAudio]) {
+      if (current.get(track) === stream) continue;
+      this.monitoredAudio.delete(track);
+      track.off(TrackEvent.Restarted, this.handleAudioTrackRestarted);
+      this.audioActivity.unwatch(stream);
+    }
+    for (const [track, stream] of current) {
+      if (this.monitoredAudio.get(track) === stream) continue;
+      this.monitoredAudio.set(track, stream);
+      track.on(TrackEvent.Restarted, this.handleAudioTrackRestarted);
+      this.audioActivity.watch(stream);
+    }
+  }
+
+  private resetAudioActivity() {
+    for (const track of this.monitoredAudio.keys()) track.off(TrackEvent.Restarted, this.handleAudioTrackRestarted);
+    this.monitoredAudio.clear();
+    this.audioActivity.reset();
   }
 
   private attachExistingMedia() {

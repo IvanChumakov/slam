@@ -2,7 +2,7 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceParticipant } from '../voice/types';
-import { VoiceRoom } from './VoiceRoom';
+import { VoiceRoom, type ConnectedRoomState } from './VoiceRoom';
 
 const participants: VoiceParticipant[] = [
   { identity: 'ivan', displayName: 'Ivan', isLocal: true, isMuted: false, isSpeaking: false },
@@ -11,13 +11,14 @@ const participants: VoiceParticipant[] = [
 
 const navigationState = { roomId: 42, rooms: [], roomsPending: false, roomsError: null,
   switching: false, inviteUrl: null, invitePending: false, inviteError: null,
-  localCamera: false, cameraSupported: true, cameras: [], cameraPending: false };
+  localCamera: false, cameraSupported: true, cameras: [], cameraPending: false, soundsEnabled: true };
 
-function renderRoom(overrides: { reconnecting?: boolean; audioBlocked?: boolean; unsupported?: boolean; pending?: boolean; cameraUnsupported?: boolean; cameraPending?: boolean } = {}) {
+function renderRoom(overrides: { reconnecting?: boolean; audioBlocked?: boolean; unsupported?: boolean; pending?: boolean; cameraUnsupported?: boolean; cameraPending?: boolean; state?: Partial<ConnectedRoomState> } = {}) {
   const actions = {
     switchRoom: vi.fn().mockResolvedValue(undefined), refreshRooms: vi.fn().mockResolvedValue(undefined), fetchInvite: vi.fn().mockResolvedValue(undefined),
     setMuted: vi.fn().mockResolvedValue(undefined),
     setIncomingMuted: vi.fn().mockResolvedValue(undefined),
+    setSoundsEnabled: vi.fn(),
     setScreenSharing: vi.fn().mockResolvedValue(undefined),
     setCameraEnabled: vi.fn().mockResolvedValue(undefined),
     enableAudio: vi.fn().mockResolvedValue(undefined),
@@ -36,6 +37,7 @@ function renderRoom(overrides: { reconnecting?: boolean; audioBlocked?: boolean;
         incomingMuted: false, localSharing: false, screens: [],
         screenShareSupported: !overrides.unsupported,
         screenSharePending: Boolean(overrides.pending), microphonePending: false, error: null,
+        ...overrides.state,
       }}
       actions={actions}
     />,
@@ -44,6 +46,82 @@ function renderRoom(overrides: { reconnecting?: boolean; audioBlocked?: boolean;
 }
 
 describe('VoiceRoom', () => {
+  it.each([
+    { state: {}, expected: ['On', 'On', 'Off', 'Off'] },
+    { state: { localMuted: true, incomingMuted: true, localCamera: true, localSharing: true }, expected: ['Off', 'Off', 'On', 'On'] },
+    { state: { needsAudioPermission: true }, expected: ['On', 'Paused', 'Off', 'Off'] },
+    { state: { needsAudioPermission: true, incomingMuted: true }, expected: ['On', 'Off', 'Off', 'Off'] },
+    { state: { microphonePending: true, cameraPending: true, screenSharePending: true }, expected: ['Wait', 'On', 'Pending', 'Wait'] },
+    { state: { cameraSupported: false, screenShareSupported: false }, expected: ['On', 'On', 'N/A', 'N/A'] },
+  ])('shows media states inside their buttons without hover: $expected', ({ state, expected }) => {
+    renderRoom({ state });
+    ['Microphone', 'Room audio', 'Camera', 'Screen sharing'].forEach((name, index) => {
+      expect(within(screen.getByRole('button', { name })).getByText(expected[index])).toBeVisible();
+    });
+    expect(within(screen.getByLabelText('Room controls')).getAllByRole('button')).toHaveLength(5);
+  });
+  it('shows current live names and remote channel rosters without switching', async () => {
+    const state = { ...navigationState, phase: 'connected' as const, roomName: 'General', participants,
+      rooms: [{ id: 42, name: 'General', online_count: 1, participants: [{ identity: 'old', display_name: 'Old name' }] },
+        { id: 43, name: 'Lounge', online_count: 2, participants: [{ identity: 'anna', display_name: 'Anna' }, { identity: 'sam', display_name: 'Sam' }] }],
+      localMuted: false, needsAudioPermission: false, incomingMuted: false, localSharing: false,
+      screens: [], screenShareSupported: true, screenSharePending: false, microphonePending: false, error: null };
+    const actions = { switchRoom: vi.fn(), refreshRooms: vi.fn(), fetchInvite: vi.fn(), setMuted: vi.fn(),
+      setIncomingMuted: vi.fn(), setSoundsEnabled: vi.fn(), setScreenSharing: vi.fn(), setCameraEnabled: vi.fn(), enableAudio: vi.fn(), leave: vi.fn() };
+    const view = render(<VoiceRoom state={state} actions={actions} />);
+    const rail = screen.getByRole('complementary', { name: 'Group channels' });
+    const own = within(rail).getByRole('list', { name: 'Participants in General' });
+    expect(within(own).getByText('Ivan')).toBeInTheDocument();
+    expect(within(own).getByText('Max')).toBeInTheDocument();
+    expect(within(own).getByText('You')).toBeInTheDocument();
+    expect(within(rail).queryByText('Old name')).not.toBeInTheDocument();
+    expect(within(rail).getByText('Anna')).toBeInTheDocument();
+    expect(within(rail).getByText('Sam')).toBeInTheDocument();
+    expect(actions.switchRoom).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: 'Channels' }));
+    expect(within(screen.getByRole('dialog')).getByText('Anna')).toBeInTheDocument();
+    view.rerender(<VoiceRoom state={{ ...state, roomsError: 'Unavailable' }} actions={actions} />);
+    expect(within(rail).getByRole('list', { name: 'Participants in Lounge (last known)' })).toHaveTextContent('Anna');
+    expect(within(rail).getByRole('list', { name: 'Participants in General' })).toHaveTextContent('Ivan');
+    view.rerender(<VoiceRoom state={{ ...state, rooms: [state.rooms[0], { ...state.rooms[1], online_count: 1, participants: [state.rooms[1].participants[1]] }] }} actions={actions} />);
+    expect(within(rail).queryByText('Anna')).not.toBeInTheDocument();
+    expect(within(rail).getByRole('list', { name: 'Participants in Lounge' })).toHaveTextContent('Sam');
+  });
+  it('uses all LiveKit participants for the current count and labels every other count stale until API recovery', async () => {
+    const state = { ...navigationState, phase: 'connected' as const, roomName: 'General', participants,
+      rooms: [{ id: 42, name: 'General', online_count: 99, participants: Array.from({ length: 99 }, (_, index) => ({ identity: `old${index}`, display_name: `Old ${index}` })) },
+        { id: 43, name: 'Lounge', online_count: 4, participants: Array.from({ length: 4 }, (_, index) => ({ identity: `guest${index}`, display_name: `Guest ${index}` })) },
+        { id: 44, name: 'Quiet', online_count: 0, participants: [] }],
+      localMuted: false, needsAudioPermission: false, incomingMuted: false, localSharing: false,
+      screens: [], screenShareSupported: true, screenSharePending: false, microphonePending: false, error: null };
+    const actions = { switchRoom: vi.fn(), refreshRooms: vi.fn(), fetchInvite: vi.fn(), setMuted: vi.fn(),
+      setIncomingMuted: vi.fn(), setSoundsEnabled: vi.fn(), setScreenSharing: vi.fn(), setCameraEnabled: vi.fn(), enableAudio: vi.fn(), leave: vi.fn() };
+    const view = render(<VoiceRoom state={state} actions={actions} />);
+    expect(screen.getByRole('button', { name: 'General, 2 online, current channel' })).toHaveTextContent('2 online');
+    expect(screen.getByRole('button', { name: 'Lounge, 4 online' })).toHaveTextContent('4 online');
+    view.rerender(<VoiceRoom state={{ ...state, roomsError: 'Unavailable' }} actions={actions} />);
+    expect(screen.getByRole('button', { name: 'General, 2 online, current channel' })).toHaveTextContent('2 online');
+    expect(screen.getByRole('button', { name: 'Lounge, 4 online (last known)' })).toHaveTextContent('4 online (last known)');
+    expect(screen.getByRole('button', { name: 'Quiet, 0 online (last known)' })).toHaveTextContent('0 online (last known)');
+    await userEvent.click(screen.getByRole('button', { name: 'Channels' }));
+    const drawer = screen.getByRole('dialog');
+    expect(within(drawer).getByRole('button', { name: 'General, 2 online, current channel' })).toHaveTextContent('2 online');
+    expect(within(drawer).getByRole('button', { name: 'Quiet, 0 online (last known)' })).toHaveTextContent('0 online (last known)');
+    view.rerender(<VoiceRoom state={{ ...state, roomsPending: true, roomsError: 'Unavailable' }} actions={actions} />);
+    expect(within(drawer).getByRole('button', { name: 'Lounge, 4 online (last known)' })).toBeInTheDocument();
+    view.rerender(<VoiceRoom state={state} actions={actions} />);
+    expect(within(drawer).getByRole('button', { name: 'Lounge, 4 online' })).toBeInTheDocument();
+    expect(screen.queryByText(/last known/)).not.toBeInTheDocument();
+  });
+  it('offers a notification sound toggle independent of microphone and room audio', async () => {
+    const actions = renderRoom();
+    const toggle = screen.getByRole('button', { name: 'Notification sounds' });
+    expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    await userEvent.click(toggle);
+    expect(actions.setSoundsEnabled).toHaveBeenCalledWith(false);
+    expect(actions.setMuted).not.toHaveBeenCalled();
+    expect(actions.setIncomingMuted).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     HTMLDialogElement.prototype.showModal = function () { this.open = true; this.querySelector<HTMLButtonElement>('button')?.focus(); };
     HTMLDialogElement.prototype.close = function () { this.open = false; this.dispatchEvent(new Event('close')); };
@@ -91,12 +169,15 @@ describe('VoiceRoom', () => {
       cameras: [{ id: 'cam', participantIdentity: 'max', displayName: 'Ivan', isLocal: false, element: camera }],
       screens: [{ id: 'screen', participantIdentity: 'ivan', displayName: 'Ivan', isLocal: true, element: shared }],
     }} actions={{ switchRoom: vi.fn(), refreshRooms: vi.fn(), fetchInvite: vi.fn(), setMuted: vi.fn(),
-      setIncomingMuted: vi.fn(), setScreenSharing: vi.fn(), setCameraEnabled: vi.fn(), enableAudio: vi.fn(), leave: vi.fn() }} />);
+      setIncomingMuted: vi.fn(), setSoundsEnabled: vi.fn(), setScreenSharing: vi.fn(), setCameraEnabled: vi.fn(), enableAudio: vi.fn(), leave: vi.fn() }} />);
     expect(screen.getByText('Speaking')).toBeInTheDocument();
     expect(camera.closest('figure')).not.toHaveClass('media-speaking');
     expect(shared.closest('figure')).toHaveClass('media-speaking');
     expect(screen.getByRole('heading', { name: 'Cameras' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Shared screens' })).toBeInTheDocument();
+    const sharedSection = screen.getByRole('region', { name: 'Shared screens' });
+    expect(sharedSection.compareDocumentPosition(screen.getByRole('list', { name: 'Participants' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(sharedSection.compareDocumentPosition(screen.getByRole('region', { name: 'Cameras' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     view.unmount();
     expect(camera.isConnected).toBe(false);
     expect(shared.isConnected).toBe(false);
@@ -190,7 +271,7 @@ describe('VoiceRoom', () => {
       error: 'Screen sharing could not start. Try again.',
       screens: [{ id: 'local', participantIdentity: 'ivan', displayName: 'Ivan', isLocal: true, element: local },
         { id: 'remote', participantIdentity: 'max', displayName: 'Max', isLocal: false, element: remote }] };
-    const actions = { switchRoom: vi.fn(), refreshRooms: vi.fn(), fetchInvite: vi.fn(), setMuted: vi.fn(), setIncomingMuted: vi.fn(), setScreenSharing: vi.fn(), setCameraEnabled: vi.fn(), enableAudio: vi.fn(), leave: vi.fn() };
+    const actions = { switchRoom: vi.fn(), refreshRooms: vi.fn(), fetchInvite: vi.fn(), setMuted: vi.fn(), setIncomingMuted: vi.fn(), setSoundsEnabled: vi.fn(), setScreenSharing: vi.fn(), setCameraEnabled: vi.fn(), enableAudio: vi.fn(), leave: vi.fn() };
     const view = render(<VoiceRoom state={state} actions={actions} />);
     expect(local.isConnected).toBe(true);
     expect(remote.isConnected).toBe(true);

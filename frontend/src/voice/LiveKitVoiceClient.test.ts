@@ -1,5 +1,8 @@
 import {
   Room,
+  ConnectionError,
+  DisconnectReason,
+  NegotiationError,
   ConnectionState,
   RoomEvent,
   Track,
@@ -139,6 +142,134 @@ function screenCaptureRoom() {
 }
 
 describe('LiveKitVoiceClient', () => {
+  it('preserves an unknown-stage timeout and disconnect reason through the hook without leaking secrets', async () => {
+    const fake = createRoom();
+    fake.connect.mockImplementation(async () => {
+      fake.room.emit(RoomEvent.SignalConnected);
+      fake.room.emit(RoomEvent.Disconnected, DisconnectReason.JOIN_FAILURE);
+      throw ConnectionError.timeout('JWT initData invite turn:password wss://secret SDP');
+    });
+    const client = new LiveKitVoiceClient(() => fake.room);
+    const api: VoiceApi = {
+      join: vi.fn().mockResolvedValue({ livekit_url: 'wss://secret', access_token: 'secret-jwt',
+        room: { id: 42, name: 'General' }, participant: { identity: 'ivan', display_name: 'Ivan' } }),
+      listRooms: vi.fn(),
+      createInvite: vi.fn(),
+    };
+    const { result } = renderHook(() => useVoiceRoom({ token: 'secret-invite', api, createClient: () => client }));
+    await act(async () => result.current.join('Ivan'));
+    expect(result.current.state.phase).toBe('error');
+    expect(result.current.state.error).toBe('Voice connection failed (connection-timeout; join_failure). Try again.');
+    expect(result.current.state.error).not.toMatch(/JWT|initData|invite|turn:|wss:|secret|SDP|ICE|RTC/);
+    expect(fake.setMicrophoneEnabled).not.toHaveBeenCalled();
+    expect(fake.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [ConnectionError.serverUnreachable('secret regional URL'), 'signaling', 'connection-serverunreachable'],
+    [ConnectionError.websocket('secret regional URL'), 'signaling', 'connection-websocket'],
+    [ConnectionError.notAllowed('secret JWT', 401), 'signaling', 'connection-notallowed'],
+    [ConnectionError.serviceNotFound('secret', 'v0-rtc'), 'signaling', 'connection-servicenotfound'],
+    [ConnectionError.timeout('secret signaling timeout'), 'unknown', 'connection-timeout'],
+    [ConnectionError.internal('secret signaling failure'), 'unknown', 'connection-internalerror'],
+    [ConnectionError.cancelled('secret'), 'unknown', 'connection-cancelled'],
+    [new NegotiationError('secret SDP'), 'rtc', 'sdk-13'],
+    [new Error('secret'), 'unknown', 'unknown'],
+  ] as const)('classifies the final error of an internal region retry by public error evidence: %s', async (failure, stage, code) => {
+    const fake = createRoom();
+    fake.connect.mockImplementation(async () => {
+      // Region A joined signaling, then failed RTC. Room.connect retries region B
+      // internally without a public event marking the start of that attempt.
+      fake.room.emit(RoomEvent.SignalConnected);
+      await Promise.resolve();
+      throw failure;
+    });
+    const client = new LiveKitVoiceClient(() => fake.room);
+    const error = await client.connect('wss://secret', 'jwt').catch((error: unknown) => error);
+    expect(error).toMatchObject({ stage, code });
+    expect(JSON.stringify(error)).not.toMatch(/secret|JWT|SDP|wss:/);
+    expect((error as Error).message).not.toMatch(/secret|JWT|SDP|wss:/);
+    expect(fake.connect).toHaveBeenCalledOnce();
+    expect(fake.setMicrophoneEnabled).not.toHaveBeenCalled();
+    await client.disconnect();
+  });
+
+  it('retains a disconnect reason when connect rejects after signaling', async () => {
+    const fake = createRoom();
+    fake.connect.mockImplementation(async () => {
+      fake.room.emit(RoomEvent.SignalConnected);
+      fake.room.emit(RoomEvent.Disconnected, DisconnectReason.JOIN_FAILURE);
+      throw ConnectionError.timeout('secret');
+    });
+    const client = new LiveKitVoiceClient(() => fake.room);
+    await expect(client.connect('wss://secret', 'jwt')).rejects.toMatchObject({ stage: 'unknown', code: 'connection-timeout', disconnectReason: 'join_failure' });
+    await client.disconnect();
+  });
+  it.each([false, true])('classifies connect failure with signaling connected=%s without leaking SDK messages', async (signaled) => {
+    const fake = createRoom();
+    fake.connect.mockImplementation(async () => {
+      if (signaled) fake.room.emit(RoomEvent.SignalConnected);
+      throw ConnectionError.timeout('JWT initData invite turn:password wss://secret SDP');
+    });
+    const client = new LiveKitVoiceClient(() => fake.room);
+    const error = await client.connect('wss://secret', 'jwt').catch((error: unknown) => error);
+    expect(error).toMatchObject({ stage: 'unknown', code: 'connection-timeout' });
+    expect(JSON.stringify(error)).not.toMatch(/JWT|initData|invite|turn:|wss:|SDP|ICE/);
+    expect((error as Error).message).not.toContain('secret');
+    expect(fake.setMicrophoneEnabled).not.toHaveBeenCalled();
+    await client.disconnect();
+    expect(fake.room.listenerCount(RoomEvent.SignalConnected)).toBe(0);
+  });
+
+  it.each([new NegotiationError('secret SDP'), new Error('secret ICE failure')])('normalizes SDK errors and preserves unknown instead of guessing ICE', async (failure) => {
+    const fake = createRoom(); fake.connect.mockRejectedValue(failure);
+    const client = new LiveKitVoiceClient(() => fake.room);
+    await expect(client.connect('wss://secret', 'jwt')).rejects.toMatchObject({ stage: failure instanceof NegotiationError ? 'rtc' : 'unknown', code: failure instanceof NegotiationError ? 'sdk-13' : 'unknown' });
+    await client.disconnect();
+  });
+
+  it.each([DisconnectReason.SIGNAL_CLOSE, undefined, 999])('keeps a normalized disconnect reason %s', async (reason) => {
+    const fake = createRoom(); const client = new LiveKitVoiceClient(() => fake.room);
+    const listener = vi.fn(); client.subscribe(listener);
+    await client.connect('wss://rtc.test', 'jwt');
+    fake.room.emit(RoomEvent.Disconnected, reason as DisconnectReason);
+    expect(listener.mock.lastCall?.[0].disconnectReason).toBe(reason === DisconnectReason.SIGNAL_CLOSE ? 'signal_close' : 'unknown');
+    await client.disconnect();
+  });
+
+  it.each([new DOMException('secret', 'NotAllowedError'), new Error('secret')])('classifies microphone failures safely', async (failure) => {
+    const fake = createRoom(); fake.setMicrophoneEnabled.mockRejectedValue(failure);
+    const client = new LiveKitVoiceClient(() => fake.room);
+    await client.connect('wss://rtc.test', 'jwt');
+    await expect(client.enableMicrophone()).rejects.toMatchObject({ stage: 'microphone', code: failure instanceof DOMException ? 'permission-denied' : 'unknown' });
+    await client.disconnect();
+  });
+  it('reads local and remote avatar metadata and refreshes it without capturing media', async () => {
+    const fake = createRoom();
+    fake.room.localParticipant.metadata = JSON.stringify({ avatar_url: 'https://images.test/local' });
+    const peer = participant('alex', 'Alex', false);
+    peer.metadata = JSON.stringify({ avatar_url: 'https://images.test/remote' });
+    fake.room.remoteParticipants.set('alex', peer);
+    const client = new LiveKitVoiceClient(() => fake.room);
+    const listener = vi.fn(); client.subscribe(listener);
+    await client.connect('wss://rtc.test', 'jwt');
+    expect(listener.mock.lastCall?.[0].participants).toEqual(expect.arrayContaining([
+      expect.objectContaining({ identity: 'ivan', avatarUrl: 'https://images.test/local' }),
+      expect.objectContaining({ identity: 'alex', avatarUrl: 'https://images.test/remote' }),
+    ]));
+    for (const metadata of ['broken', 'null', '[]', '{"avatar_url":"http://unsafe.test"}', '{"avatar_url":"https://user:pass@images.test"}']) {
+      peer.metadata = metadata;
+      fake.room.emit(RoomEvent.ParticipantMetadataChanged, '', peer);
+      expect(listener.mock.lastCall?.[0].participants.find((entry: { identity: string }) => entry.identity === 'alex').avatarUrl).toBeUndefined();
+    }
+    peer.metadata = JSON.stringify({ avatar_url: 'https://images.test/updated' });
+    fake.room.emit(RoomEvent.ParticipantMetadataChanged, '', peer);
+    expect(listener.mock.lastCall?.[0].participants[1].avatarUrl).toBe('https://images.test/updated');
+    expect(fake.setMicrophoneEnabled).not.toHaveBeenCalled();
+    expect(fake.setScreenShareEnabled).not.toHaveBeenCalled();
+    await client.disconnect();
+    expect(fake.room.listenerCount(RoomEvent.ParticipantMetadataChanged)).toBe(0);
+  });
   it('captures camera video only on explicit request and stops/unpublishes it without touching screens or microphone', async () => {
     vi.stubGlobal('navigator', { mediaDevices: { getUserMedia: vi.fn() } });
     const fake = screenCaptureRoom();
@@ -209,7 +340,7 @@ describe('LiveKitVoiceClient', () => {
     const api: VoiceApi = {
       join: vi.fn().mockResolvedValueOnce(credentials).mockResolvedValue({ ...credentials, room: { id: 43, name: 'Lounge' } }),
       listRooms: vi.fn().mockResolvedValue({ current_room_id: 42, rooms: [
-        { id: 42, name: 'General', online_count: 1 }, { id: 43, name: 'Lounge', online_count: 0 },
+        { id: 42, name: 'General', online_count: 1, participants: [{ identity: 'ivan', display_name: 'Ivan' }] }, { id: 43, name: 'Lounge', online_count: 0, participants: [] },
       ] }),
       createInvite: vi.fn().mockResolvedValue({ join_token: 'target', join_url: 'https://voice.test/join/target',
         room: { id: 43, name: 'Lounge' }, expires_in: 3600 }),

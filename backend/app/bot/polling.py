@@ -9,6 +9,8 @@ from app.config import get_settings
 from app.db.repositories import RoomRepository
 from app.db.session import create_db_engine, create_session_factory
 from app.services.livekit import LiveKitTokenService
+from app.services.presence import LiveKitPresenceSource
+from app.services.telegram import TelegramProfileService
 from app.services.tokens import JoinTokenService
 from app.services.voice import VoiceService
 
@@ -25,7 +27,19 @@ async def run() -> None:
         settings.livekit_api_key.get_secret_value(),
         settings.livekit_api_secret.get_secret_value(),
     )
-    voice_service = VoiceService(repository, join_tokens, livekit_tokens, settings.livekit_url)
+    presence = LiveKitPresenceSource(
+        str(settings.livekit_api_url),
+        settings.livekit_api_key.get_secret_value(),
+        settings.livekit_api_secret.get_secret_value(),
+    )
+    voice_service = VoiceService(
+        repository,
+        join_tokens,
+        livekit_tokens,
+        settings.livekit_url,
+        presence,
+        TelegramProfileService(settings.bot_token.get_secret_value()),
+    )
     bot, dispatcher = create_dispatcher(
         settings=settings,
         session_factory=factory,
@@ -43,6 +57,7 @@ async def run() -> None:
         await dispatcher.start_polling(bot)
     finally:
         await bot.session.close()
+        await presence.aclose()
         await engine.dispose()
 
 

@@ -26,6 +26,11 @@ def dispatcher_for(app_context: tuple) -> tuple[Dispatcher, Bot, AsyncMock]:
     app, _, factory, _ = app_context
     transport = AsyncMock(return_value=topic_message(777, text="sent"))
     bot = Bot(token="123456:TEST_TOKEN", session=transport)
+    bot.me = AsyncMock(
+        return_value=User(
+            id=123456, is_bot=True, first_name="Test", username="test_bot", has_main_web_app=False
+        )
+    )
     dispatcher = Dispatcher(
         session_factory=factory,
         room_repository=app.state.room_repository,

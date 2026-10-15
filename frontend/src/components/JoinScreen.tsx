@@ -1,11 +1,13 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { FormEvent } from 'react';
+import type { TelegramProfile } from '../telegram';
 
 type JoinScreenProps = {
   busy: boolean;
   error: string | null;
   progressMessage?: string;
   onJoin: (displayName: string) => void;
+  profile?: TelegramProfile | null;
 };
 
 export function JoinScreen({
@@ -13,8 +15,11 @@ export function JoinScreen({
   error,
   progressMessage,
   onJoin,
+  profile,
 }: JoinScreenProps) {
-  const [name, setName] = useState('');
+  const [customName, setCustomName] = useState<string | null>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
+  const name = customName ?? profile?.username ?? '';
   const [validationError, setValidationError] = useState<string | null>(null);
   const errorText = validationError ?? error;
 
@@ -24,6 +29,7 @@ export function JoinScreen({
 
     if (!displayName) {
       setValidationError('Enter your name');
+      nameRef.current?.focus();
       return;
     }
 
@@ -45,9 +51,10 @@ export function JoinScreen({
       <form className="join-form" onSubmit={handleSubmit} noValidate>
         <label htmlFor="display-name">Your name</label>
         <input
+          ref={nameRef}
           id="display-name"
           value={name}
-          onChange={(event) => setName(event.target.value)}
+          onChange={(event) => setCustomName(event.target.value)}
           maxLength={32}
           autoComplete="nickname"
           placeholder="Ivan"
@@ -56,7 +63,6 @@ export function JoinScreen({
           }
           aria-invalid={Boolean(errorText)}
           disabled={busy}
-          autoFocus
         />
         {errorText ? (
           <p className="form-error" id="join-error" role="alert">

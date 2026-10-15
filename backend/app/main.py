@@ -9,6 +9,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.routes import RoomNotifier, router
 from app.bot.notifier import NullRoomNotifier, TelegramRoomNotifier
+from app.bot.session import TelegramSession
 from app.config import Settings, get_settings
 from app.db.repositories import RoomRepository
 from app.db.session import create_db_engine, create_session_factory
@@ -18,6 +19,8 @@ from app.services.livekit import (
     LiveKitWebhookParser,
     LiveKitWebhookService,
 )
+from app.services.presence import LiveKitPresenceReader, LiveKitPresenceSource, PresenceSynchronizer
+from app.services.telegram import TelegramProfileService, TelegramProfileVerifier
 from app.services.tokens import JoinTokenService
 from app.services.voice import VoiceService
 
@@ -30,6 +33,8 @@ def create_app(
     livekit_tokens: LiveKitTokenIssuer | None = None,
     livekit_webhooks: LiveKitWebhookParser | None = None,
     room_notifier: RoomNotifier | None = None,
+    livekit_presence: LiveKitPresenceReader | None = None,
+    telegram_profiles: TelegramProfileVerifier | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     owns_engine = engine is None
@@ -47,26 +52,52 @@ def create_app(
         settings.livekit_api_key.get_secret_value(),
         settings.livekit_api_secret.get_secret_value(),
     )
-    voice_service = VoiceService(repository, join_tokens, livekit_tokens, settings.livekit_url)
+    owns_presence = livekit_presence is None
+    livekit_presence = livekit_presence or LiveKitPresenceSource(
+        str(settings.livekit_api_url),
+        settings.livekit_api_key.get_secret_value(),
+        settings.livekit_api_secret.get_secret_value(),
+    )
+    telegram_profiles = telegram_profiles or TelegramProfileService(
+        settings.bot_token.get_secret_value()
+    )
+    voice_service = VoiceService(
+        repository,
+        join_tokens,
+        livekit_tokens,
+        settings.livekit_url,
+        livekit_presence,
+        telegram_profiles,
+    )
     bot: Bot | None = None
     if room_notifier is None and settings.environment != "test":
-        bot = Bot(settings.bot_token.get_secret_value())
+        bot = Bot(settings.bot_token.get_secret_value(), session=TelegramSession())
         room_notifier = TelegramRoomNotifier(
             bot,
             session_factory,
             repository,
             join_tokens,
             str(settings.frontend_public_url),
+            notify_pin_failure=False,
         )
     room_notifier = room_notifier or NullRoomNotifier()
+    presence_sync = PresenceSynchronizer(
+        livekit_presence, session_factory, repository, room_notifier
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        yield
-        if bot is not None:
-            await bot.session.close()
-        if owns_engine:
-            await engine.dispose()
+        presence_sync.start()
+        try:
+            yield
+        finally:
+            await presence_sync.stop()
+            if owns_presence:
+                await livekit_presence.aclose()
+            if bot is not None:
+                await bot.session.close()
+            if owns_engine:
+                await engine.dispose()
 
     docs_enabled = settings.environment != "production"
     app = FastAPI(
@@ -83,8 +114,11 @@ def create_app(
     app.state.room_repository = repository
     app.state.join_tokens = join_tokens
     app.state.voice_service = voice_service
+    app.state.telegram_profiles = telegram_profiles
     app.state.livekit_webhooks = livekit_webhooks
     app.state.room_notifier = room_notifier
+    app.state.livekit_presence = livekit_presence
+    app.state.presence_sync = presence_sync
 
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
     if settings.allowed_origins:

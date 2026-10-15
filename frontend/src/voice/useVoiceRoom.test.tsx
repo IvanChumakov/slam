@@ -1,9 +1,13 @@
 import { act, renderHook } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { StrictMode } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { VoiceApiError } from '../api/voiceApi';
 import type { VoiceApi } from '../api/voiceApi';
-import type { VoiceClient, VoiceSnapshot } from './types';
+import { VoiceClientError, type VoiceClient, type VoiceSnapshot } from './types';
 import { useVoiceRoom } from './useVoiceRoom';
+
+const sounds = vi.hoisted(() => ({ unlock: vi.fn(), play: vi.fn(), setEnabled: vi.fn(), dispose: vi.fn() }));
+vi.mock('./roomSounds', () => ({ createRoomSounds: () => sounds }));
 
 const credentials = {
   livekit_url: 'wss://rtc.test',
@@ -43,12 +47,369 @@ function createFakeVoiceClient() {
 
 function createApi(): VoiceApi {
   return { join: vi.fn().mockResolvedValue(credentials),
-    listRooms: vi.fn().mockResolvedValue({ current_room_id: 42, rooms: [{ id: 42, name: 'General', online_count: 1 }, { id: 43, name: 'Lounge', online_count: 0 }] }),
+    listRooms: vi.fn().mockResolvedValue({ current_room_id: 42, rooms: [{ id: 42, name: 'General', online_count: 1, participants: members(1) }, { id: 43, name: 'Lounge', online_count: 0, participants: [] }] }),
     createInvite: vi.fn().mockResolvedValue({ join_token: 'target', join_url: 'https://voice.test/join/target', room: { id: 43, name: 'Lounge' }, expires_in: 3600 }),
   };
 }
 
+function members(count: number) {
+  return Array.from({ length: count }, (_, index) => ({ identity: `guest_${index}`, display_name: `Guest ${index}` }));
+}
+
 describe('useVoiceRoom', () => {
+  it('keeps normalized disconnect reasons in the UI error', async () => {
+    const voice = createFakeVoiceClient();
+    const { result } = renderHook(() => useVoiceRoom({ token: 'signed', api: createApi(), createClient: () => voice.client }));
+    await act(async () => result.current.join('Ivan'));
+    await act(async () => voice.emit({ ...cameraOff, connection: 'disconnected', disconnectReason: 'signal_close', participants: [],
+      localMuted: false, needsAudioPermission: false, incomingMuted: false, localSharing: false, screenShareSupported: false, screens: [] }));
+    expect(result.current.state.error).toContain('signal_close');
+  });
+  it.each(['signaling', 'rtc', 'microphone'] as const)('shows safe %s diagnostics and allows manual retry', async (stage) => {
+    const api = createApi(); const voice = createFakeVoiceClient();
+    vi.mocked(stage === 'microphone' ? voice.client.enableMicrophone : voice.client.connect)
+      .mockRejectedValueOnce(new VoiceClientError(stage, 'unknown'));
+    const { result } = renderHook(() => useVoiceRoom({ token: 'signed', api, createClient: () => voice.client }));
+    await act(async () => result.current.join('Ivan'));
+    expect(result.current.state.error?.toLowerCase()).toContain(stage);
+    expect(result.current.state.error).not.toMatch(/ICE|JWT|wss:|SDP/);
+    expect(voice.client.disconnect).toHaveBeenCalledOnce();
+    await act(async () => result.current.retry());
+    expect(result.current.state.phase).toBe('connected');
+    expect(api.join).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the microphone denied message for normalized SDK failures', async () => {
+    const voice = createFakeVoiceClient();
+    vi.mocked(voice.client.enableMicrophone).mockRejectedValue(new VoiceClientError('microphone', 'permission-denied'));
+    const { result } = renderHook(() => useVoiceRoom({ token: 'signed', api: createApi(), createClient: () => voice.client }));
+    await act(async () => result.current.join('Ivan'));
+    expect(result.current.state.error).toBe('Microphone access was denied. Allow access in your browser and try again.');
+  });
+
+  it('shows a join timeout and retries only on explicit request', async () => {
+    const api = createApi(); const voice = createFakeVoiceClient();
+    vi.mocked(api.join).mockRejectedValueOnce(new VoiceApiError('join-timeout', 200));
+    const { result } = renderHook(() => useVoiceRoom({ token: 'signed', api, createClient: () => voice.client }));
+    await act(async () => result.current.join('Ivan'));
+    expect(result.current.state.error).toContain('30 seconds');
+    expect(api.join).toHaveBeenCalledOnce();
+    expect(voice.client.connect).not.toHaveBeenCalled();
+    await act(async () => result.current.retry());
+    expect(result.current.state.phase).toBe('connected');
+  });
+  it('aborts credentials on Leave and ignores a late response after a fresh join', async () => {
+    const api = createApi(); const voice = createFakeVoiceClient();
+    let resolve!: (value: typeof credentials) => void;
+    vi.mocked(api.join).mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    const factory = vi.fn(() => voice.client);
+    const { result } = renderHook(() => useVoiceRoom({ token: 'signed', api, createClient: factory }));
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.join('Ivan'); });
+    const signal = vi.mocked(api.join).mock.calls[0][3];
+    expect(signal).toBeInstanceOf(AbortSignal);
+    await act(async () => result.current.leave());
+    expect(signal?.aborted).toBe(true);
+    await act(async () => result.current.join('Max'));
+    await act(async () => { resolve(credentials); await pending; });
+    expect(factory).toHaveBeenCalledOnce();
+    expect(voice.client.enableMicrophone).toHaveBeenCalledOnce();
+    expect(result.current.state.phase).toBe('connected');
+  });
+
+  it('does not add a late Telegram profile to an already selected guest session', async () => {
+    const api = createApi(); const voice = createFakeVoiceClient();
+    const { result, rerender } = renderHook(({ initData }) => useVoiceRoom({ token: 'signed', api, createClient: () => voice.client, telegramInitData: initData }),
+      { initialProps: { initData: undefined as string | undefined } });
+    await act(async () => result.current.join('Guest'));
+    expect(api.join).toHaveBeenLastCalledWith('signed', 'Guest', undefined, expect.any(AbortSignal));
+    rerender({ initData: 'verified-late' });
+    vi.mocked(api.join).mockResolvedValue({ ...credentials, room: { id: 43, name: 'Lounge' } });
+    await act(async () => result.current.switchRoom(43));
+    expect(api.join).toHaveBeenLastCalledWith('target', 'Guest', undefined, expect.any(AbortSignal));
+    await act(async () => result.current.leave());
+    act(() => result.current.reset());
+    await act(async () => result.current.join('Telegram name'));
+    expect(api.join).toHaveBeenLastCalledWith('target', 'Telegram name', 'verified-late', expect.any(AbortSignal));
+  });
+  it('retains verified Telegram init data through a switch and bearer change without extra capture', async () => {
+    const api = createApi(); const old = createFakeVoiceClient(); const next = createFakeVoiceClient();
+    vi.mocked(api.join).mockResolvedValueOnce(credentials).mockResolvedValue({ ...credentials, room: { id: 43, name: 'Lounge' } });
+    const factory = vi.fn().mockReturnValueOnce(old.client).mockReturnValueOnce(next.client);
+    const { result, rerender } = renderHook(({ token }) => useVoiceRoom({ token, api, createClient: factory, telegramInitData: 'verified' }), { initialProps: { token: 'signed' } });
+    await act(async () => result.current.join('Alex'));
+    expect(api.join).toHaveBeenLastCalledWith('signed', 'Alex', 'verified', expect.any(AbortSignal));
+    await act(async () => result.current.switchRoom(43));
+    expect(api.join).toHaveBeenLastCalledWith('target', 'Alex', 'verified', expect.any(AbortSignal));
+    rerender({ token: 'target' });
+    expect(next.client.disconnect).not.toHaveBeenCalled();
+    expect(old.client.enableMicrophone).toHaveBeenCalledOnce();
+    expect(next.client.enableMicrophone).toHaveBeenCalledOnce();
+  });
+  beforeEach(() => vi.clearAllMocks());
+  afterEach(() => vi.useRealTimers());
+
+  it('silently refreshes channels every five seconds without rejoining under StrictMode', async () => {
+    vi.useFakeTimers();
+    const api = createApi(); const voice = createFakeVoiceClient();
+    const { result, unmount } = renderHook(() => useVoiceRoom({ token: 'signed', api, createClient: () => voice.client }), { wrapper: StrictMode });
+    await act(async () => result.current.join('Ivan'));
+    expect(api.listRooms).toHaveBeenCalledOnce();
+    await act(async () => vi.advanceTimersByTimeAsync(4999));
+    expect(api.listRooms).toHaveBeenCalledOnce();
+    let resolveListing!: (value: Awaited<ReturnType<VoiceApi['listRooms']>>) => void;
+    vi.mocked(api.listRooms).mockReturnValueOnce(new Promise((resolve) => { resolveListing = resolve; }));
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(api.listRooms).toHaveBeenCalledTimes(2);
+    expect(result.current.state.roomsPending).toBe(false);
+    await act(async () => resolveListing({ current_room_id: 42, rooms: [{ id: 43, name: 'Lounge', online_count: 7, participants: members(7) }] }));
+    expect(result.current.state.rooms[0].online_count).toBe(7);
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(api.listRooms).toHaveBeenCalledTimes(3);
+    expect(api.join).toHaveBeenCalledOnce();
+    expect(voice.client.connect).toHaveBeenCalledOnce();
+    expect(sounds.play.mock.calls).toEqual([['join']]);
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+    await act(async () => vi.advanceTimersByTimeAsync(10000));
+    expect(api.listRooms).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not overlap automatic refreshes with automatic or explicit requests', async () => {
+    vi.useFakeTimers();
+    const api = createApi(); const voice = createFakeVoiceClient();
+    const { result } = renderHook(() => useVoiceRoom({ token: 'signed', api, createClient: () => voice.client }));
+    await act(async () => result.current.join('Ivan'));
+    let resolveListing!: (value: Awaited<ReturnType<VoiceApi['listRooms']>>) => void;
+    vi.mocked(api.listRooms).mockImplementation(() => new Promise((resolve) => { resolveListing = resolve; }));
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(api.listRooms).toHaveBeenCalledTimes(2);
+    await act(async () => vi.advanceTimersByTimeAsync(15000));
+    expect(api.listRooms).toHaveBeenCalledTimes(2);
+    const listing = { current_room_id: 42, rooms: [{ id: 42, name: 'General', online_count: 2, participants: members(2) }] };
+    await act(async () => resolveListing(listing));
+    let explicit!: Promise<void>;
+    act(() => { explicit = result.current.refreshRooms(); });
+    expect(result.current.state.roomsPending).toBe(true);
+    await act(async () => vi.advanceTimersByTimeAsync(10000));
+    expect(api.listRooms).toHaveBeenCalledTimes(3);
+    await act(async () => { resolveListing(listing); await explicit; });
+    expect(result.current.state.roomsPending).toBe(false);
+  });
+
+  it('preserves last known counts and their error through pending retries until recovery', async () => {
+    vi.useFakeTimers();
+    const api = createApi(); const voice = createFakeVoiceClient();
+    const { result } = renderHook(() => useVoiceRoom({ token: 'signed', api, createClient: () => voice.client }));
+    await act(async () => result.current.join('Ivan'));
+    const rooms = result.current.state.rooms;
+    vi.mocked(api.listRooms).mockRejectedValueOnce(new VoiceApiError('backend-unavailable'));
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(result.current.state.rooms).toEqual(rooms);
+    expect(result.current.state.roomsError).toBeTruthy();
+    let resolveListing!: (value: Awaited<ReturnType<VoiceApi['listRooms']>>) => void;
+    vi.mocked(api.listRooms).mockReturnValueOnce(new Promise((resolve) => { resolveListing = resolve; }));
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(result.current.state).toMatchObject({ rooms, roomsPending: false });
+    expect(result.current.state.roomsError).toBeTruthy();
+    await act(async () => resolveListing({ current_room_id: 42, rooms: [{ id: 43, name: 'Lounge', online_count: 3, participants: members(3) }] }));
+    expect(result.current.state.roomsError).toBeNull();
+    expect(result.current.state.rooms[0].online_count).toBe(3);
+  });
+
+  it.each(['leave', 'disconnected', 'reconnecting', 'unmount'] as const)('stops polling and ignores in-flight results after %s', async (retirement) => {
+    vi.useFakeTimers();
+    const api = createApi(); const voice = createFakeVoiceClient();
+    const { result, unmount } = renderHook(() => useVoiceRoom({ token: 'signed', api, createClient: () => voice.client }));
+    await act(async () => result.current.join('Ivan'));
+    let resolveListing!: (value: Awaited<ReturnType<VoiceApi['listRooms']>>) => void;
+    vi.mocked(api.listRooms).mockReturnValueOnce(new Promise((resolve) => { resolveListing = resolve; }));
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(api.listRooms).toHaveBeenCalledTimes(2);
+    const snapshot: VoiceSnapshot = { ...cameraOff, connection: 'connected', participants: [], localMuted: false,
+      incomingMuted: false, localSharing: false, screenShareSupported: true, screens: [], needsAudioPermission: false };
+    if (retirement === 'leave') await act(async () => result.current.leave());
+    else if (retirement === 'unmount') unmount();
+    else act(() => voice.emit({ ...snapshot, connection: retirement }));
+    expect(vi.getTimerCount()).toBe(0);
+    await act(async () => {
+      resolveListing({ current_room_id: 42, rooms: [{ id: 43, name: 'Late', online_count: 99, participants: members(99) }] });
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+    expect(api.listRooms).toHaveBeenCalledTimes(2);
+    if (retirement !== 'unmount') expect(result.current.state.rooms.some((room) => room.name === 'Late')).toBe(false);
+    if (retirement === 'reconnecting') {
+      act(() => voice.emit(snapshot));
+      await act(async () => vi.advanceTimersByTimeAsync(5000));
+      expect(api.listRooms).toHaveBeenCalledTimes(3);
+    }
+  });
+
+  it('pauses polling during switch lookup and ignores the old token response after switching', async () => {
+    vi.useFakeTimers();
+    const api = createApi(); const old = createFakeVoiceClient(); const next = createFakeVoiceClient();
+    vi.mocked(api.join).mockResolvedValueOnce(credentials).mockResolvedValue({ ...credentials, room: { id: 43, name: 'Lounge' } });
+    const factory = vi.fn().mockReturnValueOnce(old.client).mockReturnValueOnce(next.client);
+    const { result } = renderHook(() => useVoiceRoom({ token: 'signed', api, createClient: factory }));
+    await act(async () => result.current.join('Ivan'));
+    let resolveListing!: (value: Awaited<ReturnType<VoiceApi['listRooms']>>) => void;
+    vi.mocked(api.listRooms).mockReturnValueOnce(new Promise((resolve) => { resolveListing = resolve; }));
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(api.listRooms).toHaveBeenCalledTimes(2);
+    let resolveInvite!: (value: Awaited<ReturnType<VoiceApi['createInvite']>>) => void;
+    vi.mocked(api.createInvite).mockReturnValueOnce(new Promise((resolve) => { resolveInvite = resolve; }));
+    let switching!: Promise<void>;
+    act(() => { switching = result.current.switchRoom(43); });
+    expect(vi.getTimerCount()).toBe(0);
+    await act(async () => vi.advanceTimersByTimeAsync(10000));
+    expect(api.listRooms).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      resolveInvite({ join_token: 'target', join_url: 'https://voice.test/join/target', room: { id: 43, name: 'Lounge' }, expires_in: 3600 });
+      await switching;
+    });
+    expect(api.listRooms).toHaveBeenLastCalledWith('target');
+    await act(async () => resolveListing({ current_room_id: 42, rooms: [{ id: 42, name: 'Late', online_count: 99, participants: members(99) }] }));
+    expect(result.current.state.rooms.some((room) => room.name === 'Late')).toBe(false);
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(api.listRooms).toHaveBeenCalledTimes(4);
+    expect(api.listRooms).toHaveBeenLastCalledWith('target');
+  });
+
+  it('sounds successful local actions, but not failures or unchanged mute state', async () => {
+    const voice = createFakeVoiceClient();
+    const { result } = renderHook(() => useVoiceRoom({ token: 'signed', api: createApi(), createClient: () => voice.client }));
+    await act(async () => result.current.join('Ivan'));
+    expect(sounds.unlock).toHaveBeenCalled();
+    expect(sounds.play.mock.calls).toEqual([['join']]);
+    await act(async () => result.current.setMuted(true));
+    await act(async () => result.current.setMuted(true));
+    await act(async () => result.current.setMuted(false));
+    vi.mocked(voice.client.setMuted).mockRejectedValueOnce(new Error('denied'));
+    await act(async () => result.current.setMuted(true));
+    await act(async () => result.current.setIncomingMuted(true));
+    await act(async () => result.current.setIncomingMuted(false));
+    await act(async () => result.current.leave());
+    await act(async () => result.current.leave());
+    expect(sounds.play.mock.calls).toEqual([['join'], ['mute'], ['unmute'], ['audioOff'], ['audioOn'], ['leave']]);
+  });
+
+  it('does not sound initial occupants, speaking changes or reconnection membership changes', async () => {
+    const voice = createFakeVoiceClient();
+    const remote = { identity: 'max', displayName: 'Max', isLocal: false, isMuted: false, isSpeaking: false };
+    const snapshot: VoiceSnapshot = { ...cameraOff, connection: 'connected', participants: [remote], localMuted: false,
+      incomingMuted: false, localSharing: false, screenShareSupported: true, screens: [], needsAudioPermission: false };
+    vi.mocked(voice.client.connect).mockImplementation(async () => voice.emit(snapshot));
+    const { result } = renderHook(() => useVoiceRoom({ token: 'signed', api: createApi(), createClient: () => voice.client }));
+    await act(async () => result.current.join('Ivan'));
+    sounds.play.mockClear();
+    act(() => voice.emit({ ...snapshot, participants: [{ ...remote, isSpeaking: true }] }));
+    expect(sounds.play).not.toHaveBeenCalled();
+    const anna = { ...remote, identity: 'anna', displayName: 'Anna' };
+    await act(async () => voice.emit({ ...snapshot, participants: [remote, anna] }));
+    await act(async () => voice.emit({ ...snapshot, participants: [remote, anna] }));
+    await act(async () => voice.emit(snapshot));
+    expect(sounds.play.mock.calls).toEqual([['participantJoin'], ['participantLeave']]);
+    sounds.play.mockClear();
+    act(() => voice.emit({ ...snapshot, connection: 'reconnecting' }));
+    act(() => voice.emit({ ...snapshot, participants: [anna] }));
+    act(() => voice.emit({ ...snapshot, participants: [anna] }));
+    expect(sounds.play).not.toHaveBeenCalled();
+  });
+
+  it('suppresses membership removals emitted before the SDK marks a full restart as reconnecting', async () => {
+    const voice = createFakeVoiceClient();
+    const snapshot: VoiceSnapshot = { ...cameraOff, connection: 'connected', participants: [
+      { identity: 'max', displayName: 'Max', isLocal: false, isMuted: false, isSpeaking: false },
+    ], localMuted: false, incomingMuted: false, localSharing: false, screenShareSupported: true, screens: [], needsAudioPermission: false };
+    vi.mocked(voice.client.connect).mockImplementation(async () => voice.emit(snapshot));
+    const { result } = renderHook(() => useVoiceRoom({ token: 'signed', api: createApi(), createClient: () => voice.client }));
+    await act(async () => result.current.join('Ivan'));
+    sounds.play.mockClear();
+    await act(async () => {
+      voice.emit({ ...snapshot, participants: [] });
+      voice.emit({ ...snapshot, connection: 'reconnecting', participants: [] });
+      voice.emit(snapshot);
+    });
+    expect(sounds.play).not.toHaveBeenCalled();
+  });
+
+  it('does not sound an old Leave completing after Join again starts', async () => {
+    const old = createFakeVoiceClient(); const next = createFakeVoiceClient();
+    const factory = vi.fn().mockReturnValueOnce(old.client).mockReturnValueOnce(next.client);
+    const { result } = renderHook(() => useVoiceRoom({ token: 'signed', api: createApi(), createClient: factory }));
+    await act(async () => result.current.join('Ivan'));
+    let resolveDisconnect!: () => void;
+    vi.mocked(old.client.disconnect).mockReturnValueOnce(new Promise((resolve) => { resolveDisconnect = resolve; }));
+    let leaving!: Promise<void>;
+    act(() => { leaving = result.current.leave(); });
+    act(() => result.current.reset());
+    let joining!: Promise<void>;
+    act(() => { joining = result.current.join('Ivan'); });
+    sounds.play.mockClear();
+    await act(async () => { resolveDisconnect(); await leaving; await joining; });
+    expect(sounds.play.mock.calls).toEqual([['join']]);
+  });
+
+  it('keeps the sound preference across leaving and resetting and disposes on unmount', async () => {
+    const voice = createFakeVoiceClient();
+    const { result, unmount } = renderHook(() => useVoiceRoom({ token: 'signed', api: createApi(), createClient: () => voice.client }));
+    expect(result.current.state.soundsEnabled).toBe(true);
+    act(() => result.current.setSoundsEnabled(false));
+    expect(sounds.setEnabled).toHaveBeenLastCalledWith(false);
+    await act(async () => result.current.join('Ivan'));
+    await act(async () => result.current.leave());
+    act(() => result.current.reset());
+    expect(result.current.state.soundsEnabled).toBe(false);
+    unmount();
+    expect(sounds.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('sounds a successful channel switch without repeating restored mute preferences', async () => {
+    const old = createFakeVoiceClient(); const next = createFakeVoiceClient(); const api = createApi();
+    vi.mocked(api.join).mockResolvedValueOnce(credentials).mockResolvedValue({ ...credentials, room: { id: 43, name: 'Lounge' } });
+    const factory = vi.fn().mockReturnValueOnce(old.client).mockReturnValueOnce(next.client);
+    const { result } = renderHook(() => useVoiceRoom({ token: 'signed', api, createClient: factory }));
+    await act(async () => result.current.join('Ivan'));
+    await act(async () => result.current.setMuted(true));
+    await act(async () => result.current.setIncomingMuted(true));
+    sounds.play.mockClear();
+    await act(async () => result.current.switchRoom(43));
+    expect(sounds.play.mock.calls).toEqual([['leave'], ['join']]);
+    act(() => old.emit({ ...cameraOff, connection: 'connected', participants: [], localMuted: false,
+      incomingMuted: false, localSharing: false, screenShareSupported: true, screens: [], needsAudioPermission: false }));
+    expect(sounds.play).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not sound a cancelled join or mute completing after leaving', async () => {
+    const voice = createFakeVoiceClient();
+    let resolveMicrophone!: () => void;
+    vi.mocked(voice.client.enableMicrophone).mockReturnValueOnce(new Promise((resolve) => { resolveMicrophone = resolve; }));
+    const { result } = renderHook(() => useVoiceRoom({ token: 'signed', api: createApi(), createClient: () => voice.client }));
+    let joining!: Promise<void>;
+    act(() => { joining = result.current.join('Ivan'); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => result.current.leave());
+    await act(async () => { resolveMicrophone(); await joining; });
+    expect(sounds.play).not.toHaveBeenCalled();
+    await act(async () => result.current.join('Ivan'));
+    let resolveMute!: () => void;
+    vi.mocked(voice.client.setMuted).mockReturnValueOnce(new Promise((resolve) => { resolveMute = resolve; }));
+    let muting!: Promise<void>;
+    act(() => { muting = result.current.setMuted(true); });
+    await act(async () => result.current.leave());
+    sounds.play.mockClear();
+    await act(async () => { resolveMute(); await muting; });
+    expect(sounds.play).not.toHaveBeenCalled();
+  });
+
+  it('reinitializes sound resources after StrictMode cleanup', async () => {
+    const voice = createFakeVoiceClient();
+    const { result } = renderHook(() => useVoiceRoom({ token: 'signed', api: createApi(), createClient: () => voice.client }), { wrapper: StrictMode });
+    expect(sounds.dispose).toHaveBeenCalledOnce();
+    await act(async () => result.current.join('Ivan'));
+    expect(sounds.unlock).toHaveBeenCalledOnce();
+    expect(sounds.play).toHaveBeenCalledWith('join');
+  });
   it('lets Off cancel pending enable and ignores stale completion while a newer enable is pending', async () => {
     const voice = createFakeVoiceClient();
     let rejectOld!: (error: unknown) => void;
@@ -248,7 +609,7 @@ describe('useVoiceRoom', () => {
     await act(async () => result.current.join('Max'));
     expect(old.client.disconnect).toHaveBeenCalledTimes(2);
     expect(next.client.connect).toHaveBeenCalledOnce();
-    expect(api.join).toHaveBeenLastCalledWith('signed', 'Max');
+    expect(api.join).toHaveBeenLastCalledWith('signed', 'Max', undefined, expect.any(AbortSignal));
     expect(result.current.state.phase).toBe('connected');
   });
 
@@ -274,7 +635,7 @@ describe('useVoiceRoom', () => {
     expect(next.client.connect).toHaveBeenCalledOnce();
     expect(next.client.setIncomingMuted).toHaveBeenCalledWith(true);
     expect(next.client.enableMicrophone).not.toHaveBeenCalled();
-    expect(api.join).toHaveBeenLastCalledWith('signed', 'Ivan');
+    expect(api.join).toHaveBeenLastCalledWith('signed', 'Ivan', undefined, expect.any(AbortSignal));
     expect(result.current.state).toMatchObject({ phase: 'connected', roomId: 42, switching: false });
     const requestsBeforeLateResponse = vi.mocked(api.join).mock.calls.length;
     await act(async () => { resolveMetadata(); await switching; });
@@ -296,7 +657,7 @@ describe('useVoiceRoom', () => {
     act(() => result.current.reset());
     await act(async () => result.current.join('Max'));
     expect(next.client.connect).toHaveBeenCalledOnce();
-    expect(api.join).toHaveBeenLastCalledWith('signed', 'Max');
+    expect(api.join).toHaveBeenLastCalledWith('signed', 'Max', undefined, expect.any(AbortSignal));
     await act(async () => { resolveInvite({ join_token: 'target', join_url: 'https://voice.test/join/target', room: { id: 43, name: 'Lounge' }, expires_in: 3600 }); await pending; });
     expect(result.current.state).toMatchObject({ phase: 'connected', roomId: 42 });
   });
@@ -443,7 +804,7 @@ describe('useVoiceRoom', () => {
     await act(async () => result.current.join('Ivan'));
     act(() => old.emit({ ...cameraOff, connection: 'connected', participants: [], localMuted: true, incomingMuted: true, localSharing: true, screenShareSupported: true, screens: [], needsAudioPermission: false }));
     vi.mocked(old.client.disconnect).mockImplementation(async () => {
-      expect(api.join).toHaveBeenLastCalledWith('target', 'Ivan');
+      expect(api.join).toHaveBeenLastCalledWith('target', 'Ivan', undefined, expect.any(AbortSignal));
       expect(next.client.connect).not.toHaveBeenCalled();
     });
     vi.mocked(next.client.connect).mockImplementation(async () => {
@@ -472,7 +833,7 @@ describe('useVoiceRoom', () => {
     await act(async () => result.current.join('Ivan'));
     expect(result.current.state.phase).toBe('connected');
     expect(result.current.state.roomsError).toBeTruthy();
-    vi.mocked(api.listRooms).mockResolvedValue({ current_room_id: 42, rooms: [{ id: 42, name: 'General', online_count: 1 }, { id: 43, name: 'Lounge', online_count: 0 }] });
+    vi.mocked(api.listRooms).mockResolvedValue({ current_room_id: 42, rooms: [{ id: 42, name: 'General', online_count: 1, participants: members(1) }, { id: 43, name: 'Lounge', online_count: 0, participants: [] }] });
     await act(async () => result.current.refreshRooms());
     vi.mocked(api.join).mockRejectedValue(new VoiceApiError('backend-unavailable'));
     await act(async () => result.current.switchRoom(43));
@@ -534,7 +895,7 @@ describe('useVoiceRoom', () => {
     expect(failed.client.disconnect).toHaveBeenCalledOnce();
     expect(result.current.state.phase).toBe('error');
     await act(async () => result.current.retry());
-    expect(api.join).toHaveBeenLastCalledWith('target', 'Ivan');
+    expect(api.join).toHaveBeenLastCalledWith('target', 'Ivan', undefined, expect.any(AbortSignal));
     expect(result.current.state).toMatchObject({ phase: 'connected', roomId: 43 });
   });
 
@@ -569,7 +930,7 @@ describe('useVoiceRoom', () => {
     });
 
     expect(api.join).toHaveBeenCalledTimes(1);
-    expect(api.join).toHaveBeenCalledWith('signed', 'Ivan');
+    expect(api.join).toHaveBeenCalledWith('signed', 'Ivan', undefined, expect.any(AbortSignal));
     expect(voice.client.connect).toHaveBeenCalledWith('wss://rtc.test', 'jwt');
     expect(voice.client.enableMicrophone).toHaveBeenCalledOnce();
     expect(result.current.state).toMatchObject({

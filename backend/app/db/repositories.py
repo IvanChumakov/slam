@@ -131,6 +131,18 @@ class RoomRepository:
             select(VoiceRoom).options(selectinload(VoiceRoom.group)).where(VoiceRoom.id == room_id)
         )
 
+    async def get_room_with_group_for_update(
+        self, session: AsyncSession, room_id: int
+    ) -> VoiceRoom | None:
+        # NO KEY UPDATE serializes cards without blocking participant FK inserts.
+        return await session.scalar(
+            select(VoiceRoom)
+            .options(selectinload(VoiceRoom.group))
+            .where(VoiceRoom.id == room_id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+
     async def get_room_in_group(
         self, session: AsyncSession, *, room_id: int, group_id: int
     ) -> VoiceRoom | None:
@@ -166,8 +178,40 @@ class RoomRepository:
     async def set_telegram_message_id(
         self, session: AsyncSession, room: VoiceRoom, message_id: int
     ) -> None:
-        room.telegram_message_id = message_id
+        current = await self.get_room_with_group_for_update(session, room.id)
+        if current is None:
+            raise LookupError("voice room disappeared")
+        previous = current.telegram_message_id
+        pending = set(current.telegram_pending_unpin_ids)
+        if previous is not None and message_id < previous:
+            pending.add(message_id)
+        else:
+            if previous is not None and previous != message_id:
+                pending.add(previous)
+            current.telegram_message_id = message_id
+            current.telegram_pin_pending = True
+            if previous != message_id:
+                current.telegram_replacement_blocked = False
+        pending.discard(current.telegram_message_id)
+        current.telegram_pending_unpin_ids = sorted(pending)
         await session.flush()
+
+    async def sync_participants(
+        self, session: AsyncSession, *, room_id: int, participants: dict[str, str]
+    ) -> None:
+        statement = delete(RoomParticipant).where(RoomParticipant.room_id == room_id)
+        if participants:
+            statement = statement.where(RoomParticipant.identity.not_in(participants))
+        await session.execute(statement)
+        for identity, name in participants.items():
+            statement = self._participant_insert_for(session).values(
+                room_id=room_id, identity=identity, display_name=name
+            )
+            await session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["room_id", "identity"], set_={"display_name": name}
+                )
+            )
 
     async def presence(self, session: AsyncSession, room: VoiceRoom) -> RoomPresence:
         names = tuple(

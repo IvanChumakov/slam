@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Protocol
@@ -7,7 +8,7 @@ from livekit import api
 
 class LiveKitTokenIssuer(Protocol):
     def generate_livekit_token(
-        self, *, room_name: str, identity: str, display_name: str
+        self, *, room_name: str, identity: str, display_name: str, avatar_url: str | None = None
     ) -> str: ...
 
 
@@ -17,8 +18,10 @@ class LiveKitTokenService:
         self._api_secret = api_secret
         self._ttl = timedelta(seconds=ttl_seconds)
 
-    def generate_livekit_token(self, *, room_name: str, identity: str, display_name: str) -> str:
-        return (
+    def generate_livekit_token(
+        self, *, room_name: str, identity: str, display_name: str, avatar_url: str | None = None
+    ) -> str:
+        token = (
             api.AccessToken(self._api_key, self._api_secret)
             .with_identity(identity)
             .with_name(display_name)
@@ -32,8 +35,10 @@ class LiveKitTokenService:
                     can_publish_data=False,
                 )
             )
-            .to_jwt()
         )
+        if avatar_url is not None:
+            token.with_metadata(json.dumps({"avatar_url": avatar_url}, separators=(",", ":")))
+        return token.to_jwt()
 
 
 @dataclass(frozen=True, slots=True)

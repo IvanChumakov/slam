@@ -5,8 +5,8 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.notifier import TelegramRoomNotifier
-from app.bot.pinning import pin_room_card
-from app.bot.presentation import join_keyboard, room_message
+from app.bot.pinning import sync_room_card_pins
+from app.bot.presentation import room_keyboard, room_message
 from app.db.repositories import RoomRepository
 from app.services.tokens import JoinTokenService
 from app.services.voice import VoiceService
@@ -86,11 +86,10 @@ async def voice_handler(
         room = await room_repository.get_room_with_group(session, room.id)
         if room is None:  # pragma: no cover - database invariant guard
             raise RuntimeError("created room disappeared")
-        presence = await room_repository.presence(session, room)
+        presence = await voice_service.presence(session, room)
         token = join_tokens.create_join_token(room.id, room.group.telegram_chat_id)
-        url = f"{frontend_public_url.rstrip('/')}/join/{token}"
         text = room_message(room.name, presence.online_count, presence.participant_names)
-        markup = join_keyboard(url)
+        markup = await room_keyboard(bot, frontend_public_url, token)
 
         sent = await bot.send_message(
             chat_id=message.chat.id,
@@ -99,13 +98,9 @@ async def voice_handler(
             message_thread_id=message.message_thread_id,
         )
         await room_repository.set_telegram_message_id(session, room, sent.message_id)
+        room_id = room.id
         await session.commit()
-        await pin_room_card(
-            bot,
-            chat_id=message.chat.id,
-            message_id=sent.message_id,
-            thread_id=message.message_thread_id,
-        )
+    await sync_room_card_pins(bot, session_factory, room_repository, room_id)
 
 
 async def voice_button_handler(

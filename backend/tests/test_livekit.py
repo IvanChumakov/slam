@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 
 import jwt
 from livekit import api
@@ -22,6 +23,16 @@ def test_livekit_token_has_required_room_permissions() -> None:
     assert claims["video"]["roomJoin"] is True
     assert claims["video"]["canPublish"] is True
     assert claims["video"]["canSubscribe"] is True
+    assert claims.get("metadata", "") == ""
+
+
+def test_livekit_avatar_metadata_contains_only_photo():
+    secret = "livekit-secret-which-is-long-enough-for-hs256"
+    token = LiveKitTokenService("api-key", secret).generate_livekit_token(
+        room_name="room", identity="guest_1", display_name="Edited", avatar_url="https://t.me/photo"
+    )
+    claims = jwt.decode(token, secret, algorithms=["HS256"])
+    assert json.loads(claims["metadata"]) == {"avatar_url": "https://t.me/photo"}
 
 
 def test_livekit_webhook_signature_and_payload_are_verified() -> None:

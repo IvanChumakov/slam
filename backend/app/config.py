@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     join_token_secret: SecretStr
     join_token_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
     livekit_url: str
+    livekit_api_url: AnyHttpUrl = Field(
+        default="http://livekit:7880",
+        description="Server-side HTTP control API, separate from the browser-facing WS endpoint",
+    )
     livekit_api_key: SecretStr
     livekit_api_secret: SecretStr
 

@@ -10,6 +10,7 @@ export type ConnectedRoomState = VoiceRoomState;
 export type VoiceRoomActions = {
   setMuted(muted: boolean): Promise<void>;
   setIncomingMuted(muted: boolean): Promise<void>;
+  setSoundsEnabled(enabled: boolean): void;
   setScreenSharing(sharing: boolean): Promise<void>;
   setCameraEnabled(enabled: boolean): Promise<void>;
   enableAudio(): Promise<void>;
@@ -82,18 +83,38 @@ export function VoiceRoom({ state, actions }: VoiceRoomProps) {
       <p className="eyebrow">Your group</p>
       <h2>Group channels</h2>
       <ul className="channel-list">
-        {state.rooms.map((room) => (
-          <li key={room.id}>
-            <button className="button channel-button"
-              aria-current={room.id === state.roomId ? 'true' : undefined}
-              aria-label={`${room.name}, ${room.online_count} online${room.id === state.roomId ? ', current channel' : ''}`}
-              disabled={blocked || state.microphonePending || room.id === state.roomId}
-              onClick={() => { closeDrawer(); void actions.switchRoom(room.id); }}>
-              <span className="channel-name">{room.name}{room.id === state.roomId ? <small>Current</small> : null}</span>
-              <span className="channel-count">{room.online_count} online</span>
-            </button>
-          </li>
-        ))}
+        {state.rooms.map((room) => {
+          const actualCount = room.id === state.roomId && state.phase === 'connected';
+          const count = actualCount ? state.participants.length : room.online_count;
+          const countLabel = `${count} online${!actualCount && state.roomsError ? ' (last known)' : ''}`;
+          const roster = actualCount
+            ? state.participants.map((participant) => ({ identity: participant.identity, name: participant.displayName, isLocal: participant.isLocal }))
+            : room.participants.map((participant) => ({ identity: participant.identity, name: participant.display_name, isLocal: false }))
+              .sort((left, right) => left.name.localeCompare(right.name) || left.identity.localeCompare(right.identity));
+          const stale = !actualCount && Boolean(state.roomsError);
+          return (
+            <li key={room.id}>
+              <button className="button channel-button"
+                aria-current={room.id === state.roomId ? 'true' : undefined}
+                aria-label={`${room.name}, ${countLabel}${room.id === state.roomId ? ', current channel' : ''}`}
+                disabled={blocked || state.microphonePending || room.id === state.roomId}
+                onClick={() => { closeDrawer(); void actions.switchRoom(room.id); }}>
+                <span className="channel-name">{room.name}{room.id === state.roomId ? <small>Current</small> : null}</span>
+                <span className="channel-count">{countLabel}</span>
+              </button>
+              {roster.length > 0 ? <>
+                <ul className="channel-roster" aria-label={`Participants in ${room.name}${stale ? ' (last known)' : ''}`}>
+                  {roster.map((participant) => <li className="channel-roster-member" key={participant.identity}>
+                    <span className="channel-roster-avatar" aria-hidden="true">{Array.from(participant.name.trim())[0]?.toUpperCase() || '?'}</span>
+                    <span className="channel-roster-name">{participant.name}</span>
+                    {participant.isLocal ? <small className="channel-roster-you">You</small> : null}
+                  </li>)}
+                </ul>
+                {stale ? <p className="channel-roster-stale">Last known participants</p> : null}
+              </> : null}
+            </li>
+          );
+        })}
       </ul>
       {state.roomsPending ? <p className="screen-share-help" role="status">Loading channels...</p> : null}
       {state.roomsError ? <p className="form-error" role="alert">Channels could not load: {state.roomsError}</p> : null}
@@ -127,9 +148,15 @@ export function VoiceRoom({ state, actions }: VoiceRoomProps) {
       {state.error ? <p className="form-error room-error" role="alert">{state.error}</p> : null}
 
       <section className="invite-section" aria-label="Share this room">
+        <div className="room-tools">
         <button className="button button-secondary" disabled={state.invitePending || state.switching || state.phase !== 'connected'} onClick={() => void actions.fetchInvite()}>
           {state.invitePending ? 'Getting invite...' : 'Share room'}
         </button>
+        <button className="button button-secondary" aria-label="Notification sounds" aria-pressed={state.soundsEnabled}
+          onClick={() => actions.setSoundsEnabled(!state.soundsEnabled)}>
+          {state.soundsEnabled ? 'Notification sounds on' : 'Notification sounds off'}
+        </button>
+        </div>
         {state.inviteError ? <p className="form-error" role="alert">Invite could not be created: {state.inviteError}</p> : null}
         {state.inviteUrl ? <RoomInvite key={state.inviteUrl} url={state.inviteUrl} /> : null}
       </section>
@@ -144,6 +171,14 @@ export function VoiceRoom({ state, actions }: VoiceRoomProps) {
             Enable audio
           </button>
         </aside>
+      ) : null}
+
+      {state.screens.length > 0 ? (
+        <section className="screen-section" aria-labelledby="screen-heading">
+          <div className="section-label"><h2 id="screen-heading">Shared screens</h2></div>
+          {state.screens.map((screen) => <RoomVideo key={screen.id} screen={screen}
+            speaking={state.participants.some((participant) => participant.identity === screen.participantIdentity && participant.isSpeaking)} />)}
+        </section>
       ) : null}
 
       <div className="participant-section">
@@ -170,14 +205,6 @@ export function VoiceRoom({ state, actions }: VoiceRoomProps) {
         </section>
       ) : null}
 
-      {state.screens.length > 0 ? (
-        <section className="screen-section" aria-labelledby="screen-heading">
-          <div className="section-label"><h2 id="screen-heading">Shared screens</h2></div>
-          {state.screens.map((screen) => <RoomVideo key={screen.id} screen={screen}
-            speaking={state.participants.some((participant) => participant.identity === screen.participantIdentity && participant.isSpeaking)} />)}
-        </section>
-      ) : null}
-
       <p className="screen-share-help" id="screen-share-help">
         {state.screenShareSupported
           ? 'Screen audio is optional in the browser chooser, where supported. Room audio mute silences incoming voices and shared audio, not your microphone.'
@@ -199,12 +226,14 @@ export function VoiceRoom({ state, actions }: VoiceRoomProps) {
               aria-describedby="mic-status mic-tooltip" aria-busy={state.microphonePending}
               disabled={blocked || state.microphonePending} onClick={() => void actions.setMuted(!state.localMuted)}>
               <RoomIcon name="mic" off={state.localMuted} /><span>Mic</span>
+              <small className="control-state">{state.microphonePending ? 'Wait' : state.localMuted ? 'Off' : 'On'}</small>
             </button><span className="control-tooltip" id="mic-tooltip" role="tooltip" hidden={tooltipsDismissed}>{state.localMuted ? 'Unmute microphone' : 'Mute microphone'}</span>
           </span>
           <span className="control-wrap">
             <button className="button control-button" aria-label="Room audio" aria-pressed={!state.incomingMuted}
               aria-describedby="audio-status audio-tooltip" disabled={state.switching} onClick={() => void actions.setIncomingMuted(!state.incomingMuted)}>
               <RoomIcon name="audio" off={state.incomingMuted} /><span>Audio</span>
+              <small className="control-state">{state.incomingMuted ? 'Off' : state.needsAudioPermission ? 'Paused' : 'On'}</small>
             </button><span className="control-tooltip" id="audio-tooltip" role="tooltip" hidden={tooltipsDismissed}>{state.incomingMuted ? 'Unmute room audio' : 'Mute room audio'}</span>
           </span>
           <span className="control-wrap">
@@ -213,6 +242,7 @@ export function VoiceRoom({ state, actions }: VoiceRoomProps) {
               disabled={blocked || (!state.cameraPending && !state.cameraSupported)}
               onClick={() => void actions.setCameraEnabled(state.cameraPending ? false : !state.localCamera)}>
               <RoomIcon name="camera" off={!state.localCamera} /><span>{state.cameraPending ? 'Cancel' : 'Camera'}</span>
+              <small className="control-state">{state.cameraPending ? 'Pending' : !state.cameraSupported ? 'N/A' : state.localCamera ? 'On' : 'Off'}</small>
             </button><span className="control-tooltip" id="camera-tooltip" role="tooltip" hidden={tooltipsDismissed}>{state.cameraPending ? 'Cancel camera request' : state.localCamera ? 'Turn off camera' : 'Turn on camera'}</span>
           </span>
           <span className="control-wrap">
@@ -220,6 +250,7 @@ export function VoiceRoom({ state, actions }: VoiceRoomProps) {
               aria-busy={state.screenSharePending} aria-describedby="screen-share-help screen-tooltip"
               disabled={blocked || state.screenSharePending || !state.screenShareSupported} onClick={() => void actions.setScreenSharing(!state.localSharing)}>
               <RoomIcon name="screen" /><span>Screen</span>
+              <small className="control-state">{state.screenSharePending ? 'Wait' : !state.screenShareSupported ? 'N/A' : state.localSharing ? 'On' : 'Off'}</small>
             </button><span className="control-tooltip" id="screen-tooltip" role="tooltip" hidden={tooltipsDismissed}>{state.localSharing ? 'Stop sharing' : 'Share screen'}</span>
           </span>
           <span className="control-wrap">

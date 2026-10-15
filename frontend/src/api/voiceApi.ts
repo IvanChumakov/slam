@@ -1,7 +1,9 @@
 export type VoiceRoomInfo = { id: number; name: string };
+export type ChannelParticipant = { identity: string; display_name: string };
+export type ChannelInfo = VoiceRoomInfo & { online_count: number; participants: ChannelParticipant[] };
 export type ListRoomsResponse = {
   current_room_id: number;
-  rooms: (VoiceRoomInfo & { online_count: number })[];
+  rooms: ChannelInfo[];
 };
 export type CreateInviteResponse = {
   join_token: string;
@@ -26,17 +28,19 @@ export type JoinVoiceResponse = {
 export type VoiceApiErrorCode =
   | 'invalid-invite'
   | 'backend-unavailable'
+  | 'join-timeout'
+  | 'join-cancelled'
   | 'invalid-response';
 
 export class VoiceApiError extends Error {
-  constructor(public readonly code: VoiceApiErrorCode) {
+  constructor(public readonly code: VoiceApiErrorCode, public readonly status?: number) {
     super(code);
     this.name = 'VoiceApiError';
   }
 }
 
 export interface VoiceApi {
-  join(joinToken: string, displayName: string): Promise<JoinVoiceResponse>;
+  join(joinToken: string, displayName: string, telegramInitData?: string, signal?: AbortSignal): Promise<JoinVoiceResponse>;
   listRooms(joinToken: string): Promise<ListRoomsResponse>;
   createInvite(joinToken: string, roomId: number): Promise<CreateInviteResponse>;
 }
@@ -67,10 +71,20 @@ function isRoom(value: unknown): value is VoiceRoomInfo {
 
 function isListRoomsResponse(value: unknown): value is ListRoomsResponse {
   if (!isRecord(value) || !Array.isArray(value.rooms)) return false;
-  return value.rooms.every((room: unknown) => isRecord(room) &&
-    Number.isSafeInteger(room.online_count) && (room.online_count as number) >= 0 && isRoom(room)) &&
+  return value.rooms.every(isChannel) &&
     value.rooms.some((room: VoiceRoomInfo) => room.id === value.current_room_id) &&
     new Set(value.rooms.map((room: VoiceRoomInfo) => room.id)).size === value.rooms.length;
+}
+
+function isChannel(value: unknown): value is ChannelInfo {
+  if (!isRecord(value)) return false;
+  const { online_count, participants } = value;
+  if (!isRoom(value) || !Number.isSafeInteger(online_count) ||
+    (online_count as number) < 0 || !Array.isArray(participants)) return false;
+  if (!participants.every((participant: unknown): participant is ChannelParticipant =>
+    isRecord(participant) && isNonemptyString(participant.identity) && isNonemptyString(participant.display_name))) return false;
+  return participants.length === online_count &&
+    new Set(participants.map((participant) => participant.identity)).size === participants.length;
 }
 
 function isCreateInviteResponse(value: unknown, roomId: number): value is CreateInviteResponse {
@@ -100,7 +114,7 @@ function isJoinVoiceResponse(value: unknown): value is JoinVoiceResponse {
 }
 
 function createMockApi(config: VoiceApiConfig): VoiceApi {
-  const rooms = [{ id: 42, name: 'General', online_count: 0 }, { id: 43, name: 'Lounge', online_count: 0 }];
+  const rooms: ChannelInfo[] = [{ id: 42, name: 'General', online_count: 0, participants: [] }, { id: 43, name: 'Lounge', online_count: 0, participants: [] }];
   const roomForToken = (token: string) => {
     const match = /^mock-room-(\d+)-/.exec(token);
     const room = rooms.find((room) => room.id === (match ? Number(match[1]) : 42));
@@ -141,44 +155,75 @@ export function createVoiceApi(
     return createMockApi(config);
   }
 
-  async function post<T>(path: string, payload: object, validate: (value: unknown) => value is T): Promise<T> {
-    let response: Response;
+  async function post<T>(path: string, payload: object, validate: (value: unknown) => value is T, signal?: AbortSignal): Promise<T> {
+    const controller = path === 'join' ? new AbortController() : undefined;
+    if (controller && signal?.aborted) throw new VoiceApiError('join-cancelled');
+    let status: number | undefined;
+    let cancelled: VoiceApiError | undefined;
+    let rejectCancellation: (error: VoiceApiError) => void = () => undefined;
+    const cancellation = new Promise<never>((_, reject) => { rejectCancellation = reject; });
+    const cancel = (code: 'join-timeout' | 'join-cancelled') => {
+      if (cancelled) return;
+      cancelled = new VoiceApiError(code, status);
+      rejectCancellation(cancelled);
+      controller?.abort();
+    };
+    const onAbort = () => cancel('join-cancelled');
+    const timer = controller ? setTimeout(() => cancel('join-timeout'), 30_000) : undefined;
+    if (controller) signal?.addEventListener('abort', onAbort, { once: true });
 
+    const request = async () => {
+      let response: Response;
+      try {
+        const baseUrl = config.apiUrl.replace(/\/+$/, '');
+        response = await fetchImpl(`${baseUrl}/api/voice/${path}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          ...(controller ? { signal: controller.signal } : {}),
+        });
+      } catch {
+        throw cancelled ?? new VoiceApiError('backend-unavailable');
+      }
+      // An abort-ignoring implementation must not start parsing a late response.
+      if (cancelled) throw cancelled;
+      status = Number.isInteger(response.status) && response.status >= 100 && response.status <= 599
+        ? response.status : undefined;
+
+      if ([401, 403, 404].includes(response.status)) {
+        throw new VoiceApiError('invalid-invite', status);
+      }
+      if (!response.ok) {
+        throw new VoiceApiError('backend-unavailable', status);
+      }
+
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch {
+        throw cancelled ?? new VoiceApiError('invalid-response', status);
+      }
+
+      if (!validate(body)) {
+        throw new VoiceApiError('invalid-response', status);
+      }
+
+      return body;
+    };
     try {
-      const baseUrl = config.apiUrl.replace(/\/+$/, '');
-      response = await fetchImpl(`${baseUrl}/api/voice/${path}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-    } catch {
-      throw new VoiceApiError('backend-unavailable');
+      // Race the entire operation, including json(), even if a mock/polyfill ignores abort.
+      return await (controller ? Promise.race([request(), cancellation]) : request());
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      if (controller) signal?.removeEventListener('abort', onAbort);
     }
-
-    if ([401, 403, 404].includes(response.status)) {
-      throw new VoiceApiError('invalid-invite');
-    }
-    if (!response.ok) {
-      throw new VoiceApiError('backend-unavailable');
-    }
-
-    let body: unknown;
-    try {
-      body = await response.json();
-    } catch {
-      throw new VoiceApiError('invalid-response');
-    }
-
-    if (!validate(body)) {
-      throw new VoiceApiError('invalid-response');
-    }
-
-    return body;
   }
 
   return {
-    join(joinToken, displayName) {
-      return post('join', { join_token: joinToken, display_name: displayName }, isJoinVoiceResponse);
+    join(joinToken, displayName, telegramInitData, signal) {
+      return post('join', { join_token: joinToken, display_name: displayName,
+        ...(telegramInitData ? { telegram_init_data: telegramInitData } : {}),
+      }, isJoinVoiceResponse, signal);
     },
     listRooms(joinToken) {
       return post('rooms', { join_token: joinToken }, isListRoomsResponse);

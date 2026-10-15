@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { VoiceApiError, createVoiceApi } from './voiceApi';
 
 const joinResponse = {
@@ -9,7 +9,74 @@ const joinResponse = {
 };
 
 describe('createVoiceApi', () => {
-  const rooms = { current_room_id: 42, rooms: [{ id: 42, name: 'General', online_count: 1 }, { id: 43, name: 'Lounge', online_count: 0 }] };
+  afterEach(() => vi.useRealTimers());
+
+  it.each(['headers', 'body'] as const)('bounds join %s to 30 seconds without retrying POST', async (stage) => {
+    vi.useFakeTimers();
+    const json = vi.fn(() => new Promise<unknown>(() => undefined));
+    const fetchImpl = vi.fn().mockImplementation(() => stage === 'headers'
+      ? new Promise<Response>(() => undefined)
+      : Promise.resolve({ ok: true, status: 200, json } as unknown as Response));
+    const api = createVoiceApi({ apiUrl: '', useMock: false }, fetchImpl);
+    let failure: unknown;
+    const pending = api.join('secret-invite', 'Ivan').catch((error: unknown) => { failure = error; });
+    await vi.advanceTimersByTimeAsync(29999);
+    expect(failure).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(failure).toMatchObject({ code: 'join-timeout', ...(stage === 'body' ? { status: 200 } : {}) });
+    await pending;
+    expect(fetchImpl.mock.calls[0][1].signal.aborted).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['headers', 'body'] as const)('cancels join during %s even when the implementation ignores abort', async (stage) => {
+    vi.useFakeTimers();
+    let resolve!: (value: Response) => void;
+    const json = vi.fn(() => new Promise<unknown>(() => undefined));
+    const fetchImpl = vi.fn().mockImplementation(() => stage === 'headers'
+      ? new Promise<Response>((done) => { resolve = done; })
+      : Promise.resolve({ ok: true, status: 200, json } as unknown as Response));
+    const api = createVoiceApi({ apiUrl: '', useMock: false }, fetchImpl);
+    const controller = new AbortController();
+    let failure: unknown;
+    const pending = api.join('invite', 'Ivan', undefined, controller.signal).catch((error: unknown) => { failure = error; });
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort('secret cancellation reason');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(failure).toMatchObject({ code: 'join-cancelled' });
+    await pending;
+    if (stage === 'headers') resolve(new Response(JSON.stringify(joinResponse)));
+    expect(fetchImpl.mock.calls[0][1].signal.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(JSON.stringify(failure)).not.toContain('secret');
+  });
+
+  it('does not POST an already cancelled join and allows a fresh manual retry', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async () => new Response(JSON.stringify(joinResponse)));
+    const api = createVoiceApi({ apiUrl: '', useMock: false }, fetchImpl);
+    const controller = new AbortController(); controller.abort();
+    await expect(api.join('invite', 'Ivan', undefined, controller.signal)).rejects.toMatchObject({ code: 'join-cancelled' });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    await expect(api.join('invite', 'Ivan')).resolves.toEqual(joinResponse);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it('retains only safe HTTP status and not response secrets', async () => {
+    const api = createVoiceApi({ apiUrl: '', useMock: false }, vi.fn().mockResolvedValue(new Response('JWT initData invite turn:password SDP', { status: 503 })));
+    const error = await api.join('secret', 'Ivan').catch((error: unknown) => error);
+    expect(error).toMatchObject({ code: 'backend-unavailable', status: 503, message: 'backend-unavailable' });
+    expect(JSON.stringify(error)).not.toMatch(/JWT|initData|invite|turn:|SDP/);
+  });
+  it('includes verified Telegram init data only when supplied', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async () => new Response(JSON.stringify(joinResponse)));
+    const api = createVoiceApi({ apiUrl: '', useMock: false }, fetchImpl);
+    await api.join('signed', 'Alex', 'verified-data');
+    expect(fetchImpl).toHaveBeenLastCalledWith('/api/voice/join', expect.objectContaining({ body: JSON.stringify({ join_token: 'signed', display_name: 'Alex', telegram_init_data: 'verified-data' }) }));
+    await api.join('signed', 'Guest');
+    expect(fetchImpl).toHaveBeenLastCalledWith('/api/voice/join', expect.objectContaining({ body: JSON.stringify({ join_token: 'signed', display_name: 'Guest' }) }));
+  });
+  const rooms = { current_room_id: 42, rooms: [{ id: 42, name: 'General', online_count: 1, participants: [{ identity: 'ivan', display_name: 'Ivan' }] }, { id: 43, name: 'Lounge', online_count: 0, participants: [] }] };
   const invite = { join_token: 'target', join_url: 'https://voice.test/join/target', room: { id: 43, name: 'Lounge' }, expires_in: 3600 };
 
   it('posts room listing and targeted invite requests using the current bearer', async () => {
@@ -20,6 +87,18 @@ describe('createVoiceApi', () => {
     await expect(api.createInvite('signed', 43)).resolves.toEqual(invite);
     expect(fetchImpl).toHaveBeenNthCalledWith(1, 'https://api.test/api/voice/rooms', expect.objectContaining({ method: 'POST', body: JSON.stringify({ join_token: 'signed' }) }));
     expect(fetchImpl).toHaveBeenNthCalledWith(2, 'https://api.test/api/voice/invite', expect.objectContaining({ method: 'POST', body: JSON.stringify({ join_token: 'signed', room_id: 43 }) }));
+  });
+
+  it.each([
+    { ...rooms, rooms: [{ ...rooms.rooms[0], participants: undefined }] },
+    { ...rooms, rooms: [{ ...rooms.rooms[0], participants: null }] },
+    { ...rooms, rooms: [{ ...rooms.rooms[0], participants: [] }] },
+    { ...rooms, rooms: [{ ...rooms.rooms[0], participants: [{ identity: '', display_name: 'Ivan' }] }] },
+    { ...rooms, rooms: [{ ...rooms.rooms[0], participants: [{ identity: 'ivan', display_name: ' ' }] }] },
+    { ...rooms, rooms: [{ ...rooms.rooms[0], online_count: 2, participants: [rooms.rooms[0].participants[0], rooms.rooms[0].participants[0]] }] },
+  ])('rejects missing, inconsistent or duplicate channel rosters: %j', async (body) => {
+    const api = createVoiceApi({ apiUrl: '', useMock: false }, vi.fn().mockResolvedValue(new Response(JSON.stringify(body))));
+    await expect(api.listRooms('signed')).rejects.toMatchObject({ code: 'invalid-response' });
   });
 
   it.each([
@@ -83,6 +162,7 @@ describe('createVoiceApi', () => {
     expect(fetchImpl).toHaveBeenCalledWith(
       'http://localhost:8000/api/voice/join',
       {
+        signal: expect.any(AbortSignal),
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -118,7 +198,7 @@ describe('createVoiceApi', () => {
     const api = createVoiceApi({ apiUrl: '', useMock: false }, fetchImpl);
 
     await expect(api.join('token', 'Ivan')).rejects.toEqual(
-      new VoiceApiError('invalid-response'),
+      new VoiceApiError('invalid-response', 200),
     );
   });
 
