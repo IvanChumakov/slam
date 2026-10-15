@@ -168,13 +168,16 @@ export function App({ dependencies = defaultDependencies }: { dependencies?: App
   }, [dependencies.loadTelegramProfile, launch]);
   return (
     <main className="app-shell">
-      <div className="app-topbar"><span className="brand">Slam <span>voice</span></span><Appearance /></div>
+      <div className="app-topbar"><span className="brand">Slam <span>voice</span></span></div>
       <Routes>
         <Route path="/" element={<MiniAppEntry launch={launch} />} />
         <Route path="/join/:token" element={<VoiceJoinPage dependencies={dependencies} profile={profile} telegramInitData={profile ? launch.initData : undefined} />} />
         <Route path="*" element={<InviteError />} />
       </Routes>
-      <p className="privacy-note">Your voice travels through the room, not Telegram.</p>
+      <footer className="app-footer">
+        <p className="privacy-note">Your voice travels through the room, not Telegram.</p>
+        <Appearance />
+      </footer>
     </main>
   );
 }

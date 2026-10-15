@@ -54,11 +54,11 @@ describe('Participant speaking visuals', () => {
     expect(screen.getByRole('img', { name: 'Alex Morgan microphone muted' })).toBeInTheDocument();
   });
 
-  it('uses the theme green for the avatar ring and soft glow', () => {
+  it('uses the selected accent for the avatar ring and soft glow', () => {
     const rule = styles.match(/\.participant-avatar-speaking\s*\{([^}]+)\}/)?.[1];
-    expect(rule).toContain('border-color: var(--online)');
+    expect(rule).toContain('border-color: var(--accent)');
     expect(rule).toContain('box-shadow:');
-    expect(rule).toContain('color-mix(in srgb, var(--online)');
+    expect(rule).toContain('color-mix(in srgb, var(--accent)');
   });
 
   it('uses short transitions and appearance fades with the existing reduced-motion override', () => {

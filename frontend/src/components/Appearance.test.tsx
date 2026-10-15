@@ -16,6 +16,54 @@ const contrast = (foreground: string, background: string) => {
 };
 
 describe('Appearance', () => {
+  it('exposes a labeled native toggle with a decorative palette and a visible button surface', async () => {
+    render(<Appearance />);
+    const summary = screen.getByText('Theme & colors').closest('summary')!;
+    expect(summary).not.toBeNull();
+    expect(summary.querySelector('svg')).toHaveAttribute('aria-hidden', 'true');
+    expect(summary.closest('details')).not.toHaveAttribute('open');
+    await userEvent.click(summary);
+    expect(summary.closest('details')).toHaveAttribute('open');
+    summary.focus();
+    expect(summary).toHaveFocus();
+    await userEvent.click(summary);
+    expect(summary.closest('details')).not.toHaveAttribute('open');
+    const rule = styles.match(/\.appearance summary\s*\{([^}]+)\}/)?.[1];
+    expect(rule).toMatch(/border:\s*1px solid var\(--border\)/);
+    expect(rule).toMatch(/background:\s*var\(--panel\)/);
+    expect(rule).toMatch(/min-height:\s*44px/);
+  });
+
+  it.each(['participant-speaking', 'participant-avatar-speaking', 'speaking-label', 'media-speaking'])(
+    'uses the selected accent for %s without changing connection green', (selector) => {
+      const rule = styles.match(new RegExp(`\\.${selector}\\s*\\{([^}]+)\\}`))?.[1];
+      expect(rule).toContain('var(--accent)');
+      expect(rule).not.toContain('var(--online)');
+      expect(styles).toMatch(/\.connection-status\s*\{[^}]+color:\s*var\(--online\)/);
+      expect(styles).toMatch(/\.status-dot\s*\{[^}]+background:\s*var\(--online\)/);
+    },
+  );
+
+  it('accounts for device and Telegram content insets on all four sides in the shell and drawer', () => {
+    for (const side of ['top', 'right', 'bottom', 'left']) {
+      expect(styles).toContain(`var(--tg-safe-area-inset-${side}, env(safe-area-inset-${side}, 0px))`);
+      expect(styles).toContain(`var(--tg-content-safe-area-inset-${side}, 0px)`);
+      for (const selector of ['app-shell', 'channel-drawer']) {
+        const rule = styles.match(new RegExp(`\\.${selector}\\s*\\{([^}]+)\\}`))?.[1];
+        expect(rule).toContain(`var(--app-padding-${side})`);
+      }
+    }
+  });
+
+  it('opens settings upwards with viewport-bounded scrolling and sizes the room from real grid rows', () => {
+    const rule = styles.match(/\.appearance-options\s*\{([^}]+)\}/)?.[1];
+    expect(rule).toMatch(/bottom:\s*calc\(100% \+ 8px\)/);
+    expect(rule).not.toMatch(/(?:^|;)\s*top:/);
+    expect(rule).toMatch(/max-height:\s*calc\(100dvh - var\(--app-padding-top\) - var\(--app-padding-bottom\)/);
+    expect(rule).toMatch(/overflow-y:\s*auto/);
+    expect(styles).toMatch(/grid-template-rows:\s*auto minmax\(0, 1fr\) auto/);
+  });
+
   it('keeps small selected-channel text above 4.5:1 contrast for every accent and mode', () => {
     const pairs = [...styles.matchAll(/--accent:\s*#([\da-f]{6});\s*--accent-soft:\s*#([\da-f]{6});/g)];
     expect(pairs).toHaveLength(9);

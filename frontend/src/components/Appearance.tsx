@@ -33,7 +33,13 @@ export function Appearance() {
 
   return (
     <details className="appearance">
-      <summary>Appearance</summary>
+      <summary>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+          <path d="M12 3a9 9 0 1 0 0 18h1a2 2 0 0 0 1.4-3.4 1.5 1.5 0 0 1 1.1-2.6H18a3 3 0 0 0 3-3 9 9 0 0 0-9-9Z" />
+          <circle cx="7.5" cy="10" r="1" /><circle cx="11" cy="6.5" r="1" /><circle cx="16" cy="8" r="1" />
+        </svg>
+        Theme &amp; colors
+      </summary>
       <div className="appearance-options">
         <label htmlFor={`${id}-mode`}>Color mode</label>
         <select id={`${id}-mode`} value={preferences.mode}

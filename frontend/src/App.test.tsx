@@ -40,6 +40,26 @@ function CurrentPath() {
 }
 
 describe('App', () => {
+  it('keeps appearance in a global footer before and during a call without reconnecting', async () => {
+    const { api, client, dependencies } = createDependencies();
+    const { container } = render(<MemoryRouter initialEntries={['/join/test-token']}><App dependencies={dependencies} /></MemoryRouter>);
+    const appearance = screen.getByText('Theme & colors').closest('details');
+    expect(container.querySelector('.app-topbar details')).toBeNull();
+    expect(container.querySelector('.app-shell > .app-footer')).toContainElement(appearance);
+    await userEvent.click(screen.getByText('Theme & colors'));
+    await userEvent.type(screen.getByLabelText('Your name'), 'Ivan');
+    await userEvent.click(screen.getByRole('button', { name: 'Join voice' }));
+    await screen.findByRole('heading', { name: 'General' });
+    expect(container.querySelector('.app-shell > .app-footer')).toContainElement(appearance);
+    expect(container.querySelectorAll('.control-buttons button')).toHaveLength(5);
+    expect(container.querySelector('.room-controls details')).toBeNull();
+    await userEvent.selectOptions(screen.getByLabelText('Accent color'), 'slate');
+    expect(document.documentElement.dataset.accent).toBe('slate');
+    expect(api.join).toHaveBeenCalledOnce();
+    expect(client.connect).toHaveBeenCalledOnce();
+    expect(client.disconnect).not.toHaveBeenCalled();
+  });
+
   it('closes the old call and uses a newly navigated invite instead of the prior bearer', async () => {
     const { api, client, dependencies } = createDependencies();
     render(<MemoryRouter initialEntries={['/join/first-token']}><App dependencies={dependencies} /><Link to="/join/second-token">Other invite</Link></MemoryRouter>);
